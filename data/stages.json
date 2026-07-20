@@ -1,0 +1,75 @@
+{
+  "stages": [
+    {
+      "id": 1,
+      "name": "Стартап",
+      "fte_range": [1, 10],
+      "managers_range": [0, 0],
+      "leaders_range": [1, 1],
+      "zone_entry": null,
+      "zone_functional": [1, 7],
+      "zone_exit": {"range": [8, 10], "type": "Наводнение"}
+    },
+    {
+      "id": 2,
+      "name": "Подъём",
+      "fte_range": [11, 19],
+      "managers_range": [1, 2],
+      "leaders_range": [1, 1],
+      "zone_entry": {"range": [11, 12], "type": "Наводнение"},
+      "zone_functional": [13, 17],
+      "zone_exit": {"range": [18, 19], "type": "Аэротруба"}
+    },
+    {
+      "id": 3,
+      "name": "Делегирование",
+      "fte_range": [20, 34],
+      "managers_range": [3, 5],
+      "leaders_range": [1, 1],
+      "zone_entry": {"range": [20, 23], "type": "Аэротруба"},
+      "zone_functional": [24, 31],
+      "zone_exit": {"range": [32, 34], "type": "Наводнение"}
+    },
+    {
+      "id": 4,
+      "name": "Профессиональная",
+      "fte_range": [35, 57],
+      "managers_range": [6, 10],
+      "leaders_range": [2, 3],
+      "zone_entry": {"range": [35, 38], "type": "Наводнение"},
+      "zone_functional": [39, 53],
+      "zone_exit": {"range": [54, 57], "type": "Аэротруба"}
+    },
+    {
+      "id": 5,
+      "name": "Интеграция",
+      "fte_range": [58, 95],
+      "managers_range": [11, 16],
+      "leaders_range": [4, 5],
+      "zone_entry": {"range": [58, 62], "type": "Аэротруба"},
+      "zone_functional": [63, 90],
+      "zone_exit": {"range": [91, 95], "type": "Наводнение"}
+    },
+    {
+      "id": 6,
+      "name": "Стратегическая",
+      "fte_range": [96, 160],
+      "managers_range": [17, 26],
+      "leaders_range": [6, 8],
+      "zone_entry": {"range": [96, 102], "type": "Наводнение"},
+      "zone_functional": [103, 154],
+      "zone_exit": {"range": [155, 160], "type": "Аэротруба"}
+    },
+    {
+      "id": 7,
+      "name": "Образ будущего",
+      "fte_range": [161, 350],
+      "managers_range": [27, 45],
+      "leaders_range": [9, 15],
+      "zone_entry": {"range": [161, 170], "type": "Аэротруба"},
+      "zone_functional": [171, 350],
+      "zone_exit": null
+    }
+  ],
+  "fte_formula": "E = round(a + b + (c * d / 40)), где a=штат, b=контракт, c=частичная занятость (чел.), d=часы/нед. у частичной занятости"
+}
