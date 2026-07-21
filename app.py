@@ -41,7 +41,25 @@ import pdf_report_builder as prb
 
 app = Flask(__name__)
 
-BASE = Path(__file__).parent
+   BASE = Path(__file__).parent
+
+
+   @app.after_request
+   def add_cors_headers(response):
+       """Разрешаем запросы с любого источника (Опросник встроен в Tilda,
+       домен там разный в зависимости от подключённого домена клиента,
+       поэтому проще разрешить всем, чем поддерживать список доменов)."""
+       response.headers["Access-Control-Allow-Origin"] = "*"
+       response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+       response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+       return response
+
+
+   @app.route("/generate-report", methods=["OPTIONS"])
+   def generate_report_preflight():
+       """Браузер сначала посылает OPTIONS-запрос (preflight) перед POST —
+       нужно ответить на него отдельно, до основного маршрута."""
+       return ("", 204)
 
 
 # ---------------------------------------------------------------------------
