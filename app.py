@@ -26,6 +26,7 @@ pdf_report_builder.py в HTTP API, чтобы Make.com мог их вызыва�
 import base64
 import io
 import json
+import requests
 from datetime import datetime
 from pathlib import Path
 
@@ -174,11 +175,17 @@ def build_client_response(payload, data, statements):
     q = payload["qualification"]
     management_styles, management_styles_scores = convert_management_styles(payload["section5"])
 
+    # section4 Опросник отправляет строкой (JSON.stringify) — проще для Make.com,
+    # чем передавать настоящий массив. Разбираем обратно в список здесь.
+    section4 = payload["section4"]
+    if isinstance(section4, str):
+        section4 = json.loads(section4)
+
     client_dimensions = {
         "priority_spheres": convert_priority_spheres(
             payload["section1"], statements["priority_spheres_map"]),
         "builder_protector_ratio": convert_builder_protector(payload["section3"]),
-        "modality": convert_modality(payload["section4"], statements["modality_questions"]),
+        "modality": convert_modality(section4, statements["modality_questions"]),
         "management_styles": management_styles,
         "management_styles_scores": management_styles_scores,
         "three_leader_roles": {
@@ -192,106 +199,8 @@ def build_client_response(payload, data, statements):
         "qualification": {
             "name": q.get("name", ""),
             "company": q.get("company", ""),
+            "email": q.get("email", ""),
+            "phone": q.get("phone", ""),
             "diagnosis_date": datetime.now().strftime("%d.%m.%Y"),
             "report_number": prb.get_next_report_number(),
-            "fte_a": float(q["fte_a"]), "fte_b": float(q["fte_b"]),
-            "fte_c": float(q["fte_c"]), "fte_d": float(q["fte_d"]),
-            "managers_actual": int(q.get("managers", 0)),
-            "leaders_actual": int(q.get("leaders", 0)),
-            "employeesYearAgo": int(q.get("employeesYearAgo", 0)),
-            "timeYears": int(q.get("timeYears", 0)),
-            "timeMonths": int(q.get("timeMonths", 0)),
-            "years_in_business": int(q.get("businessAge", 0)),
-        },
-        "flow_a_dimensions": client_dimensions,
-        "challenge_scores": payload["section2"],
-        "section8_likert_by_kse": None,  # заполним ниже, нужен stage/kse_list
-    }
-
-    # предварительный расчёт Стадии, чтобы знать порядок Непреложных правил
-    stage_zone = sa.calculate_stage_zone(
-        client_response["qualification"]["fte_a"],
-        client_response["qualification"]["fte_b"],
-        client_response["qualification"]["fte_c"],
-        client_response["qualification"]["fte_d"],
-        data,
-    )
-    stage_id = stage_zone["stage_id"]
-
-    client_response["immutable_rules_pct"] = convert_immutable_rules_pct(
-        payload["section7"], stage_id, data)
-
-    client_response["section8_likert_by_kse"] = convert_section8_by_kse(payload["section8"])
-
-    return client_response, q
-
-
-# ---------------------------------------------------------------------------
-# Эндпоинт
-# ---------------------------------------------------------------------------
-
-@app.route("/generate-report", methods=["POST"])
-def generate_report():
-    try:
-        payload = request.get_json(force=True)
-
-        data = sa.load_data()
-        with open(BASE / "data" / "stage_level_report_texts.json", encoding="utf-8") as f:
-            data["stage_level_report_texts"] = json.load(f)
-        with open(BASE / "data" / "consulting_programs.json", encoding="utf-8") as f:
-            data["consulting_programs"] = json.load(f)
-
-        statements = _load_statements()
-
-        client_response, q = build_client_response(payload, data, statements)
-        result = sa.diagnose(client_response, data)
-
-        # мета-данные для PDF (обложка/футер) — report_number уже присвоен
-        # внутри build_client_response(), повторно счётчик не дёргаем
-        report_number = client_response["qualification"]["report_number"]
-        client_for_pdf = client_response
-
-        story, page_state = prb.build_story(client_for_pdf, result, data)
-
-        buf = io.BytesIO()
-        doc = SimpleDocTemplate(
-            buf, pagesize=A4,
-            leftMargin=18 * mm, rightMargin=18 * mm, topMargin=16 * mm, bottomMargin=16 * mm,
-            title="Полная оценка состояния бизнеса",
-        )
-        meta = {
-            "report_number": report_number,
-            "diagnosis_date": client_for_pdf["qualification"]["diagnosis_date"],
-            "company": client_for_pdf["qualification"]["company"],
-            "name": client_for_pdf["qualification"]["name"],
-        }
-        doc.build(
-            story,
-            onFirstPage=partial(prb.draw_cover, meta=meta),
-            onLaterPages=partial(prb.draw_footer, meta=meta, page_state=page_state),
-        )
-        pdf_bytes = buf.getvalue()
-
-        return jsonify({
-            "ok": True,
-            "report_number": report_number,
-            "pdf_base64": base64.b64encode(pdf_bytes).decode("ascii"),
-            "diagnose_result": result,
-        })
-
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 400
-
-
-def _load_statements():
-    with open(BASE / "data" / "statements.json", encoding="utf-8") as f:
-        return json.load(f)
-
-
-@app.route("/", methods=["GET"])
-def health():
-    return jsonify({"status": "ok", "service": "fenix-report-generator"})
-
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+            "fte_a": float(q["fte_a"]), "fte_b":
