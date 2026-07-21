@@ -203,4 +203,134 @@ def build_client_response(payload, data, statements):
             "phone": q.get("phone", ""),
             "diagnosis_date": datetime.now().strftime("%d.%m.%Y"),
             "report_number": prb.get_next_report_number(),
-            "fte_a": float(q["fte_a"]), "fte_b":
+            "fte_a": float(q["fte_a"]), "fte_b": float(q["fte_b"]),
+            "fte_c": float(q["fte_c"]), "fte_d": float(q["fte_d"]),
+            "managers_actual": int(q.get("managers", 0)),
+            "leaders_actual": int(q.get("leaders", 0)),
+            "employeesYearAgo": int(q.get("employeesYearAgo", 0)),
+            "timeYears": int(q.get("timeYears", 0)),
+            "timeMonths": int(q.get("timeMonths", 0)),
+            "years_in_business": int(q.get("businessAge", 0)),
+        },
+        "flow_a_dimensions": client_dimensions,
+        "challenge_scores": payload["section2"],
+        "section8_likert_by_kse": None,  # заполним ниже, нужен stage/kse_list
+    }
+
+    # предварительный расчёт Стадии, чтобы знать порядок Непреложных правил
+    stage_zone = sa.calculate_stage_zone(
+        client_response["qualification"]["fte_a"],
+        client_response["qualification"]["fte_b"],
+        client_response["qualification"]["fte_c"],
+        client_response["qualification"]["fte_d"],
+        data,
+    )
+    stage_id = stage_zone["stage_id"]
+
+    client_response["immutable_rules_pct"] = convert_immutable_rules_pct(
+        payload["section7"], stage_id, data)
+
+    client_response["section8_likert_by_kse"] = convert_section8_by_kse(payload["section8"])
+
+    return client_response, q
+
+
+# ---------------------------------------------------------------------------
+# Эндпоинт
+# ---------------------------------------------------------------------------
+
+@app.route("/generate-report", methods=["POST"])
+def generate_report():
+    try:
+        payload = request.get_json(force=True)
+
+        data = sa.load_data()
+        with open(BASE / "data" / "stage_level_report_texts.json", encoding="utf-8") as f:
+            data["stage_level_report_texts"] = json.load(f)
+        with open(BASE / "data" / "consulting_programs.json", encoding="utf-8") as f:
+            data["consulting_programs"] = json.load(f)
+
+        statements = _load_statements()
+
+        client_response, q = build_client_response(payload, data, statements)
+        result = sa.diagnose(client_response, data)
+
+        # мета-данные для PDF (обложка/футер) — report_number уже присвоен
+        # внутри build_client_response(), повторно счётчик не дёргаем
+        report_number = client_response["qualification"]["report_number"]
+        client_for_pdf = client_response
+
+        story, page_state = prb.build_story(client_for_pdf, result, data)
+
+        buf = io.BytesIO()
+        doc = SimpleDocTemplate(
+            buf, pagesize=A4,
+            leftMargin=18 * mm, rightMargin=18 * mm, topMargin=16 * mm, bottomMargin=16 * mm,
+            title="Полная оценка состояния бизнеса",
+        )
+        meta = {
+            "report_number": report_number,
+            "diagnosis_date": client_for_pdf["qualification"]["diagnosis_date"],
+            "company": client_for_pdf["qualification"]["company"],
+            "name": client_for_pdf["qualification"]["name"],
+        }
+        doc.build(
+            story,
+            onFirstPage=partial(prb.draw_cover, meta=meta),
+            onLaterPages=partial(prb.draw_footer, meta=meta, page_state=page_state),
+        )
+        pdf_bytes = buf.getvalue()
+        pdf_b64 = base64.b64encode(pdf_bytes).decode("ascii")
+
+        # Пересылаем готовый результат в Make.com — код формирует JSON сам,
+        # никакой ручной сборки в интерфейсе Make.com не требуется.
+        forward_to_make(client_response, report_number, pdf_b64)
+
+        return jsonify({
+            "ok": True,
+            "report_number": report_number,
+            "pdf_base64": pdf_b64,
+            "diagnose_result": result,
+        })
+
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+
+MAKE_RESULT_WEBHOOK_URL = "https://hook.us2.make.com/7xgojg4ccxh1opdd5d1xn8t52666p2ik"
+
+
+def forward_to_make(client_response, report_number, pdf_b64):
+    """Отправляет уже готовый, плоский результат в Make.com — простые поля,
+    без вложенных структур, чтобы в интерфейсе Make.com не нужно было
+    ничего собирать вручную."""
+    q = client_response["qualification"]
+    payload = {
+        "report_number": report_number,
+        "name": q.get("name", ""),
+        "company": q.get("company", ""),
+        "email": q.get("email", ""),
+        "phone": q.get("phone", ""),
+        "diagnosis_date": q.get("diagnosis_date", ""),
+        "pdf_base64": pdf_b64,
+    }
+    try:
+        requests.post(MAKE_RESULT_WEBHOOK_URL, json=payload, timeout=15)
+    except Exception as e:
+        # Не роняем основной ответ клиенту, если пересылка в Make.com не удалась —
+        # просто логируем на стороне Render (видно в Logs).
+        print("Не удалось отправить результат в Make.com:", e)
+
+
+def _load_statements():
+    with open(BASE / "data" / "statements.json", encoding="utf-8") as f:
+        return json.load(f)
+
+
+@app.route("/", methods=["GET"])
+def health():
+    return jsonify({"status": "ok", "service": "fenix-report-generator"})
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
