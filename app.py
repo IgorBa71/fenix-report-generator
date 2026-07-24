@@ -442,7 +442,7 @@ def create_payment_link():
         order_id = uuid.uuid4().hex[:12]
 
         data = {
-            "order_num": order_id,
+            "order_id": order_id,
             "customer_phone": payload.get("phone", ""),
             "customer_email": payload.get("email", ""),
             "products": [
@@ -556,10 +556,13 @@ def prodamus_webhook():
     if not prodamus_verify(data_to_verify, PRODAMUS_SECRET_KEY, signature):
         return "signature incorrect", 400
 
-    # ВАЖНО: order_id в теле вебхука — это номер заказа во ВНУТРЕННЕЙ системе
-    # Продамус (не наш). Наш собственный идентификатор, переданный при
-    # создании ссылки, возвращается под ключом order_num — именно по нему
-    # сопоставляем заказ с нашей базой prodamus_orders.json.
+    # ВАЖНО (подтверждено эмпирически по логам реального вебхука 24.07.2026):
+    # при формировании ссылки на оплату наш order_id передаётся под ключом
+    # order_id — Продамус принимает именно его как "ваш номер заказа".
+    # Но в уведомлении об оплате Продамус кладёт этот же наш идентификатор
+    # обратно под ключом order_num, а под order_id — уже СВОЙ внутренний
+    # номер заказа (не наш). Поэтому сопоставлять с нашей базой
+    # prodamus_orders.json нужно именно по order_num, а не по order_id.
     order_id = incoming.get("order_num", "")
     payment_status = incoming.get("payment_status", "")
 
