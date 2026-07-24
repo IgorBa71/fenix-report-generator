@@ -26,6 +26,7 @@ pdf_report_builder.py в HTTP API, чтобы Make.com мог их вызыва�
 import base64
 import io
 import json
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -39,12 +40,24 @@ import requests
 
 import scoring_algorithm as sa
 import pdf_report_builder as prb
+from prodamus_hmac import prodamus_sign, prodamus_verify
 
 # URL вебхука Сценария 1 в Make.com ("Мгновенное уведомление мне + PDF на
 # Диск") — после генерации PDF этот сервис сам отправляет туда готовый
 # результат (report_number, контакты клиента, PDF в base64), а дальше Make
 # кладёт файл на Google Диск, пишет строку в Google Таблицу и шлёт письмо.
 MAKE_SC1_WEBHOOK_URL = "https://hook.us2.make.com/7xgojg4ccxh1opdd5d1xn8t52666p2ik"
+
+# ---------------------------------------------------------------------------
+# Интеграция оплаты Prodamus (HMAC-подписанные ссылки, без клиентского
+# JS-виджета "Единое окно" — тот не гарантирует корректное формирование
+# счёта, что подтвердила сама поддержка Продамус). ВАЖНО: секретный ключ
+# и адрес формы нужно свериться с личным кабинетом Продамус — ниже
+# указаны значения из предыдущей сессии настройки, возможно устарели.
+# ---------------------------------------------------------------------------
+PRODAMUS_FORM_URL = "https://fenix-lab.payform.ru/"
+PRODAMUS_SECRET_KEY = "fd2f5514f3c5aa90aa6cd0ab0f7352f37ba23f810646057efd0ab1945ce0bc7f"
+ORDERS_FILE = Path("/var/data/prodamus_orders.json")
 
 app = Flask(__name__)
 
@@ -380,6 +393,141 @@ def forward_to_make(client_response, pdf_base64):
 def _load_statements():
     with open(BASE / "data" / "statements.json", encoding="utf-8") as f:
         return json.load(f)
+
+
+# ---------------------------------------------------------------------------
+# Хранилище заказов Prodamus (на постоянном диске /var/data — тот же, что
+# используется для счётчика отчётов, — не сбрасывается при передеплое)
+# ---------------------------------------------------------------------------
+
+def _load_orders():
+    if ORDERS_FILE.exists():
+        return json.loads(ORDERS_FILE.read_text(encoding="utf-8"))
+    return {}
+
+
+def _save_orders(orders):
+    ORDERS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    ORDERS_FILE.write_text(json.dumps(orders, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def get_diagnostic_price(stage_id):
+    """Та же логика цены, что и в Опроснике (getDiagnosticPrice в JS) —
+    держим синхронно на обеих сторонах."""
+    return 9900 if int(stage_id) <= 3 else 14900
+
+
+def get_product_name(stage_id):
+    """Название товара для чека Prodamus зависит от диапазона Стадии."""
+    if int(stage_id) <= 3:
+        return "Полная оценка состояния бизнеса для Стадий 1-3"
+    return "Полная оценка состояния бизнеса для Стадий 4-7"
+
+
+@app.route("/create-payment-link", methods=["OPTIONS"])
+def create_payment_link_options():
+    return ("", 204)
+
+
+@app.route("/create-payment-link", methods=["POST"])
+def create_payment_link():
+    """Принимает от Опросника данные клиента и Стадии, возвращает подписанную
+    ссылку на оплату Prodamus (do=pay — сразу открывает страницу оплаты,
+    без промежуточного шага получения короткой ссылки) вместе с order_id,
+    который Опросник должен сохранить и передавать в /payment-status."""
+    try:
+        payload = request.get_json(force=True)
+        stage_id = payload["stage_id"]
+        price = get_diagnostic_price(stage_id)
+        order_id = uuid.uuid4().hex[:12]
+
+        data = {
+            "order_id": order_id,
+            "customer_phone": payload.get("phone", ""),
+            "customer_email": payload.get("email", ""),
+            "products": [
+                {
+                    "name": get_product_name(stage_id),
+                    "price": str(price),
+                    "quantity": "1",
+                }
+            ],
+            "customer_extra": payload.get("company", ""),
+            "do": "pay",
+        }
+        data["signature"] = prodamus_sign(data, PRODAMUS_SECRET_KEY)
+
+        from urllib.parse import urlencode
+        query = urlencode(_flatten_for_query(data))
+        payment_url = f"{PRODAMUS_FORM_URL}?{query}"
+
+        orders = _load_orders()
+        orders[order_id] = {
+            "paid": False,
+            "stage_id": stage_id,
+            "price": price,
+            "created_at": datetime.now().isoformat(),
+        }
+        _save_orders(orders)
+
+        return jsonify({"ok": True, "order_id": order_id, "payment_url": payment_url})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+
+def _flatten_for_query(d, parent_key=""):
+    """Строит пары (ключ, значение) в стиле PHP http_build_query, включая
+    вложенные словари/списки как products[0][name] и т.д."""
+    items = []
+    if isinstance(d, dict):
+        for k, v in d.items():
+            new_key = f"{parent_key}[{k}]" if parent_key else k
+            items.extend(_flatten_for_query(v, new_key))
+    elif isinstance(d, list):
+        for i, v in enumerate(d):
+            items.extend(_flatten_for_query(v, f"{parent_key}[{i}]"))
+    else:
+        items.append((parent_key, d))
+    return items
+
+
+@app.route("/prodamus-webhook", methods=["POST"])
+def prodamus_webhook():
+    """Приём уведомления об оплате от Prodamus. URL этого эндпоинта нужно
+    один раз прописать в личном кабинете Продамус (Настройки платёжной
+    страницы → URL для уведомлений), а не передавать в каждой ссылке —
+    сам Продамус подтверждает, что параметр urlNotification в ссылке
+    поддерживается только для одной конкретной CMS (Advantshop)."""
+    incoming = request.form.to_dict()
+    signature = request.headers.get("Sign", "")
+
+    data_to_verify = {k: v for k, v in incoming.items() if k != "signature"}
+    if not prodamus_verify(data_to_verify, PRODAMUS_SECRET_KEY, signature):
+        return "signature incorrect", 400
+
+    order_id = incoming.get("order_id", "")
+    payment_status = incoming.get("payment_status", "")
+
+    orders = _load_orders()
+    if order_id in orders:
+        orders[order_id]["paid"] = (payment_status == "success")
+        orders[order_id]["paid_at"] = datetime.now().isoformat()
+        orders[order_id]["raw_status"] = payment_status
+        _save_orders(orders)
+
+    return "success", 200
+
+
+@app.route("/payment-status/<order_id>", methods=["GET"])
+def payment_status(order_id):
+    """Опросник опрашивает этот эндпоинт после открытия окна оплаты, чтобы
+    узнать, подтвердил ли Продамус оплату, прежде чем открыть доступ
+    к разделам диагностики."""
+    orders = _load_orders()
+    order = orders.get(order_id)
+    if not order:
+        return jsonify({"ok": False, "error": "order not found"}), 404
+    return jsonify({"ok": True, "paid": order.get("paid", False)})
 
 
 @app.route("/", methods=["GET"])
