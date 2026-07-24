@@ -542,6 +542,16 @@ def prodamus_webhook():
     signature = request.headers.get("Sign", "")
 
     incoming = _unflatten_form(incoming_flat)
+
+    # ВРЕМЕННОЕ ЛОГИРОВАНИЕ для диагностики: печатаем всё, что реально пришло,
+    # чтобы точно увидеть названия полей (order_id / order_num и т.д.) в логах
+    # Render. Убрать после того, как разберёмся с сопоставлением заказов.
+    print("=== PRODAMUS WEBHOOK RAW ===", flush=True)
+    print("incoming_flat:", incoming_flat, flush=True)
+    print("incoming (unflattened):", incoming, flush=True)
+    print("signature header:", signature, flush=True)
+    print("=============================", flush=True)
+
     data_to_verify = {k: v for k, v in incoming.items() if k != "signature"}
     if not prodamus_verify(data_to_verify, PRODAMUS_SECRET_KEY, signature):
         return "signature incorrect", 400
