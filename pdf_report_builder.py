@@ -706,13 +706,21 @@ def build_story(client, result, data):
     # (самому длинному варианту переноса среди всех таблиц Разделов 2-5) и
     # затем применяется как единая высота строки во всех этих таблицах
     _measure_style = ParagraphStyle("TableCellMeasure", fontName="Roboto-Bold", fontSize=TABLE_FONT,
-                                     leading=TABLE_FONT + 3, alignment=TA_CENTER)
+                                     leading=TABLE_FONT + 3, alignment=TA_CENTER, textColor=NAVY)
+    _measure_style_red = ParagraphStyle("TableCellMeasureRed", parent=_measure_style, textColor=RED)
     _measure_p = Paragraph("Рядовые<br/>сотрудники", _measure_style)
     _measure_w, _measure_h = _measure_p.wrap(42 * mm, 1000)
     ROW_HEIGHT = _measure_h + 12  # + верх/низ паддинг 6+6pt
 
-    def _wrapped_cell(text):
-        return Paragraph(text.replace(" ", "<br/>", 1) if text == "Рядовые сотрудники" else text, _measure_style)
+    def _wrapped_cell(text, red=False):
+        # ВАЖНО: цвет текста нужно задавать здесь, внутри стиля самого
+        # Paragraph, а НЕ через TEXTCOLOR в TableStyle — для ячеек-Paragraph
+        # (в отличие от обычных строк) команда TEXTCOLOR не имеет эффекта,
+        # цвет полностью определяется ParagraphStyle. Это было причиной
+        # бага: несовпадения в разделе "Модальность" не подсвечивались
+        # красным, хотя логика сравнения была верной.
+        style = _measure_style_red if red else _measure_style
+        return Paragraph(text.replace(" ", "<br/>", 1) if text == "Рядовые сотрудники" else text, style)
 
     def two_col_value_table(rows, headers=("Текущее значение", "Целевое значение")):
         """Таблица «значение/значение» в стиле Раздела 2: тёмно-бирюзовая шапка,
@@ -748,7 +756,8 @@ def build_story(client, result, data):
         for role in roles_order:
             cur_level = display_level[inv_current[role]]
             tgt_level = display_level[inv_target[role]]
-            table_rows.append([role, _wrapped_cell(cur_level), role, _wrapped_cell(tgt_level)])
+            mismatch = inv_current[role] != inv_target[role]
+            table_rows.append([role, _wrapped_cell(cur_level, red=mismatch), role, _wrapped_cell(tgt_level)])
 
         style_cmds = [
             ("FONTNAME", (0, 0), (-1, -1), "Roboto"), ("FONTSIZE", (0, 0), (-1, -1), TABLE_FONT),
@@ -759,14 +768,9 @@ def build_story(client, result, data):
             ("TOPPADDING", (0, 0), (-1, -1), 6), ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
             ("RIGHTPADDING", (0, 1), (0, -1), 2), ("LEFTPADDING", (1, 1), (1, -1), 10),
             ("RIGHTPADDING", (2, 1), (2, -1), 2), ("LEFTPADDING", (3, 1), (3, -1), 10),
-            ("FONTNAME", (1, 1), (1, -1), "Roboto-Bold"), ("FONTNAME", (3, 1), (3, -1), "Roboto-Bold"),
-            ("TEXTCOLOR", (3, 1), (3, -1), NAVY),
             ("GRID", (0, 0), (-1, -1), 1, WHITE),
         ]
         style_cmds += _row_band_cmds(len(roles_order))
-        for i, role in enumerate(roles_order, start=1):
-            mismatch = inv_current[role] != inv_target[role]
-            style_cmds.append(("TEXTCOLOR", (1, i), (1, i), RED if mismatch else NAVY))
         row_heights = [ROW_HEIGHT] * (len(roles_order) + 1)
         t = Table(table_rows, colWidths=[44 * mm, 41 * mm, 44 * mm, 41 * mm], rowHeights=row_heights,
                   style=TableStyle(style_cmds))
