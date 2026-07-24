@@ -26,6 +26,7 @@ pdf_report_builder.py в HTTP API, чтобы Make.com мог их вызыва�
 import base64
 import io
 import json
+import re
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -113,6 +114,22 @@ MANAGEMENT_STYLE_LETTER_TO_NAME = {
     0: "Авторитетный", 1: "Коучинговый", 2: "Товарищеский",
     3: "Демократический", 4: "Эталонный", 5: "Директивный",
 }
+
+
+def normalize_phone(raw):
+    """Приводит телефон к чистому виду без скобок/дефисов/пробелов
+    (например, '+7(999) 999-99-99' -> '+79999999999'). Это нужно, чтобы:
+    1) Google Sheets не принимал номер за формулу (даёт #ERROR! на значениях
+       вида '+7(999)...', начинающихся с '+' и содержащих скобки);
+    2) данные в Google Sheets/Make были аккуратными и единообразными,
+       независимо от того, как именно телефон отформатирован в поле
+       ввода на Тильде."""
+    if not raw:
+        return raw
+    raw = raw.strip()
+    plus = raw.startswith("+")
+    digits = re.sub(r"\D", "", raw)
+    return ("+" + digits) if plus else digits
 
 
 def convert_priority_spheres(section1_answers, statements_data):
@@ -269,7 +286,7 @@ def build_client_response(payload, data, statements):
             "name": q.get("name", ""),
             "company": q.get("company", ""),
             "email": q.get("email", ""),
-            "phone": q.get("phone", ""),
+            "phone": normalize_phone(q.get("phone", "")),
             "diagnosis_date": datetime.now().strftime("%d.%m.%Y"),
             "report_number": prb.get_next_report_number(),
             "fte_a": float(q["fte_a"]), "fte_b": float(q["fte_b"]),
@@ -443,7 +460,7 @@ def create_payment_link():
 
         data = {
             "order_id": order_id,
-            "customer_phone": payload.get("phone", ""),
+            "customer_phone": normalize_phone(payload.get("phone", "")),
             "customer_email": payload.get("email", ""),
             "products": [
                 {
