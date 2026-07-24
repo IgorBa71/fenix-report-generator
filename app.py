@@ -491,6 +491,46 @@ def _flatten_for_query(d, parent_key=""):
     return items
 
 
+def _unflatten_form(flat: dict) -> dict:
+    """Разворачивает плоские ключи формы вида 'products[0][name]' обратно
+    в такую же вложенную структуру (словари/списки), какая была на стороне
+    Продамус при формировании подписи — иначе JSON для проверки подписи
+    получится другим, и подпись не совпадёт, даже если данные верны."""
+    root = {}
+    for key, value in flat.items():
+        if "[" not in key:
+            root[key] = value
+            continue
+        first, rest = key.split("[", 1)
+        parts = [first]
+        remaining = "[" + rest
+        while remaining.startswith("["):
+            end = remaining.index("]")
+            parts.append(remaining[1:end])
+            remaining = remaining[end + 1:]
+
+        node = root
+        for i, part in enumerate(parts):
+            if i == len(parts) - 1:
+                node[part] = value
+            else:
+                if part not in node or not isinstance(node[part], dict):
+                    node[part] = {}
+                node = node[part]
+
+    def _convert_sequential_to_lists(node):
+        if isinstance(node, dict):
+            converted = {k: _convert_sequential_to_lists(v) for k, v in node.items()}
+            keys = list(converted.keys())
+            if keys and all(k.isdigit() for k in keys):
+                if sorted(keys, key=int) == [str(i) for i in range(len(keys))]:
+                    return [converted[k] for k in sorted(keys, key=int)]
+            return converted
+        return node
+
+    return _convert_sequential_to_lists(root)
+
+
 @app.route("/prodamus-webhook", methods=["POST"])
 def prodamus_webhook():
     """Приём уведомления об оплате от Prodamus. URL этого эндпоинта нужно
@@ -498,9 +538,10 @@ def prodamus_webhook():
     страницы → URL для уведомлений), а не передавать в каждой ссылке —
     сам Продамус подтверждает, что параметр urlNotification в ссылке
     поддерживается только для одной конкретной CMS (Advantshop)."""
-    incoming = request.form.to_dict()
+    incoming_flat = request.form.to_dict()
     signature = request.headers.get("Sign", "")
 
+    incoming = _unflatten_form(incoming_flat)
     data_to_verify = {k: v for k, v in incoming.items() if k != "signature"}
     if not prodamus_verify(data_to_verify, PRODAMUS_SECRET_KEY, signature):
         return "signature incorrect", 400
