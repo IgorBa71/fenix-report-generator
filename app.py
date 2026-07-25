@@ -471,6 +471,13 @@ def create_payment_link():
             ],
             "customer_extra": payload.get("company", ""),
             "do": "pay",
+            # ВАЖНО: переопределяем глобальные Success/Fail URL аккаунта
+            # (которые настроены под другой продукт — LMS fenix-lms.ru) —
+            # именно для этой платёжной ссылки. Без этого клиента после
+            # оплаты редиректило на страницу логина LMS вместо того, чтобы
+            # попап Опросника закрылся сам через /payment-status.
+            "urlSuccess": "https://fenix-lab.ru/",
+            "urlReturn": "https://fenix-lab.ru/",
         }
         data["signature"] = prodamus_sign(data, PRODAMUS_SECRET_KEY)
 
