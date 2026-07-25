@@ -493,6 +493,8 @@ def create_payment_link():
             "created_at": datetime.now().isoformat(),
         }
         _save_orders(orders)
+        print(f"DEBUG create-payment-link: заказ {order_id!r} сохранён. "
+              f"Всего ключей в orders.json теперь: {len(orders)}", flush=True)
 
         return jsonify({"ok": True, "order_id": order_id, "payment_url": payment_url})
     except Exception as e:
@@ -591,11 +593,17 @@ def prodamus_webhook():
     payment_status = incoming.get("payment_status", "")
 
     orders = _load_orders()
+    print(f"DEBUG webhook: order_id из вебхука = {order_id!r}", flush=True)
+    print(f"DEBUG webhook: заказ найден в orders.json? {order_id in orders}", flush=True)
+    print(f"DEBUG webhook: все ключи сейчас в orders.json: {list(orders.keys())}", flush=True)
     if order_id in orders:
         orders[order_id]["paid"] = (payment_status == "success")
         orders[order_id]["paid_at"] = datetime.now().isoformat()
         orders[order_id]["raw_status"] = payment_status
         _save_orders(orders)
+        print(f"DEBUG webhook: заказ {order_id!r} обновлён, paid={orders[order_id]['paid']}", flush=True)
+    else:
+        print(f"DEBUG webhook: ЗАКАЗ {order_id!r} НЕ НАЙДЕН — обновление пропущено!", flush=True)
 
     return "success", 200
 
