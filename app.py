@@ -608,6 +608,72 @@ def prodamus_webhook():
     return "success", 200
 
 
+@app.route("/verify-payform-redirect", methods=["OPTIONS"])
+def verify_payform_redirect_options():
+    return ("", 204)
+
+
+@app.route("/verify-payform-redirect", methods=["POST"])
+def verify_payform_redirect():
+    """Проверка подписи редиректа urlSuccess — позволяет открыть доступ сразу
+    по возврату клиента со страницы оплаты, не дожидаясь вебхука (у вебхука
+    подтверждена задержка ~59 сек на стороне Продамус). Опросник вызывает
+    этот эндпоинт сразу после того, как Prodamus вернул клиента на urlSuccess
+    с параметрами _payform_status/_payform_id/_payform_order_id/_payform_sign
+    в URL редиректа.
+
+    ВАЖНО (подтверждено поддержкой Продамус 01.08.2026): подпись здесь
+    считается СТРОГО по трём полям _payform_status/_payform_id/
+    _payform_order_id — в отличие от вебхука, где подписывается весь $_POST.
+    Тот же секретный ключ, что и для вебхука (отдельного ключа под редирект
+    не существует). payform_order_id — это наш собственный order_id (тот,
+    что мы передавали как order_id при создании ссылки на оплату) — здесь,
+    в отличие от вебхука, Продамус НЕ подменяет его своим внутренним номером.
+
+    Вебхук (/prodamus-webhook) оставлен как есть — работает в фоне для
+    подстраховки/синхронизации, на случай если этот эндпоинт по какой-то
+    причине не был вызван (например, клиент закрыл вкладку сразу после
+    оплаты, до того как успел отработать JS Опросника)."""
+    try:
+        payload = request.get_json(force=True)
+        status = payload.get("_payform_status", "")
+        payform_id = payload.get("_payform_id", "")
+        payform_order_id = payload.get("_payform_order_id", "")
+        signature = payload.get("_payform_sign", "")
+
+        fields_to_verify = {
+            "_payform_status": status,
+            "_payform_id": payform_id,
+            "_payform_order_id": payform_order_id,
+        }
+        if not prodamus_verify(fields_to_verify, PRODAMUS_SECRET_KEY, signature):
+            print(f"DEBUG verify-payform-redirect: подпись НЕ совпала для "
+                  f"order_id={payform_order_id!r}", flush=True)
+            return jsonify({"ok": False, "valid": False, "error": "signature incorrect"}), 400
+
+        order_id = payform_order_id
+        paid = (status == "success")
+
+        orders = _load_orders()
+        if order_id in orders:
+            if paid:
+                orders[order_id]["paid"] = True
+                orders[order_id]["paid_at"] = datetime.now().isoformat()
+                orders[order_id]["raw_status"] = status
+                orders[order_id]["confirmed_via"] = "redirect"
+                _save_orders(orders)
+            print(f"DEBUG verify-payform-redirect: заказ {order_id!r} проверен, "
+                  f"paid={paid}", flush=True)
+        else:
+            print(f"DEBUG verify-payform-redirect: заказ {order_id!r} НЕ НАЙДЕН "
+                  f"в orders.json — подпись верна, но сопоставить с заказом "
+                  f"не удалось", flush=True)
+
+        return jsonify({"ok": True, "valid": True, "paid": paid})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+
 @app.route("/payment-status/<order_id>", methods=["GET"])
 def payment_status(order_id):
     """Опросник опрашивает этот эндпоинт после открытия окна оплаты, чтобы
