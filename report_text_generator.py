@@ -345,7 +345,7 @@ def _find_deficit_areas(kse, area_deficit, mapping):
 
 
 def _render_kse_justification(row, challenge_scores, area_deficit, mapping, flow_a):
-    """Абзац 'Почему именно он' — три ветки: авто-триггер Правил роста, авто-триггер
+    """Абзац 'Почему именно этот Элемент' — три ветки: авто-триггер Правил роста, авто-триггер
     кадрового разрыва, обычный (симптомы + Области).
 
     Важно: проверяем флаг flow_a["auto_triggers"] напрямую, а не текст яруса —
@@ -391,7 +391,7 @@ def _render_kse_justification(row, challenge_scores, area_deficit, mapping, flow
 
     if not parts:
         return 'Этот Элемент относится к приоритетным для Вашей текущей Стадии роста.'
-    return "Почему именно он: " + "; также ".join(parts) + "."
+    return "Почему именно этот Элемент: " + "; также ".join(parts) + "."
 
 
 def render_section11_kse_list(diagnose_result, client_challenge_scores, data):
