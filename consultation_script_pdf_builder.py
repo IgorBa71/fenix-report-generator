@@ -206,9 +206,13 @@ def section_band(title):
 def build_pdf(sections, qualification, stage_name, output_path):
     """sections: результат build_script_sections() — [(title, text), ...].
     qualification/stage_name: те же dict/строка, что уже передавались в
-    build_full_script() — для титульной строки."""
+    build_full_script() — для титульной строки. output_path: путь к файлу
+    (str/Path) ИЛИ файлоподобный объект с .write() (например io.BytesIO —
+    так вызывает app.py, без записи на диск, для одноразового ответа
+    веб-запроса)."""
     doc = SimpleDocTemplate(
-        str(output_path), pagesize=A4,
+        output_path if hasattr(output_path, "write") else str(output_path),
+        pagesize=A4,
         leftMargin=MARGIN, rightMargin=MARGIN, topMargin=MARGIN, bottomMargin=MARGIN,
         title=f"Скрипт консультации — {qualification.get('name', '')}",
     )
