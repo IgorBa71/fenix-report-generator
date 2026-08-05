@@ -297,10 +297,22 @@ def build_client_response(payload, data, statements):
             "timeYears": int(q.get("timeYears", 0)),
             "timeMonths": int(q.get("timeMonths", 0)),
             "years_in_business": int(q.get("businessAge", 0)),
+            # Эти 3 поля — прямой ввод клиента (Шаг 3 регистрации Опросника),
+            # не вычисляются scoring_algorithm. Раньше не прокидывались сюда —
+            # Скрипт консультации (consultation_script_builder.py) их читал
+            # напрямую из payload в обход client_response. Прокидываем здесь,
+            # чтобы client_response был самодостаточным для любого потребителя.
+            "psychographic": q.get("psychographic", {}),
+            "urgency": q.get("urgency", ""),
+            "decisionMaker": q.get("decisionMaker", ""),
         },
         "flow_a_dimensions": client_dimensions,
         "challenge_scores": payload["section2"],
         "section8_likert_by_kse": None,  # заполним ниже, нужен stage/kse_list
+        # Раздел 9 «Ваш взгляд на ситуацию» — тоже прямой ввод клиента (7
+        # открытых вопросов), не часть scoring_algorithm. Пробрасываем как
+        # есть, без изменений, для Скрипта консультации.
+        "section9": payload.get("section9", {}),
     }
 
     # предварительный расчёт Стадии, чтобы знать порядок Непреложных правил
