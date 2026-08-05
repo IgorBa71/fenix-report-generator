@@ -43,6 +43,14 @@ import scoring_algorithm as sa
 import pdf_report_builder as prb
 from prodamus_hmac import prodamus_sign, prodamus_verify
 
+# Скрипт консультации для Игоря (не для клиента!) — генерируется ДОПОЛНИТЕЛЬНО
+# к клиентскому Отчёту, из тех же diagnose_result/client_response. Обёрнут в
+# try/except в generate_report(): ошибка здесь никогда не должна ронять
+# генерацию клиентского PDF-отчёта.
+from script_adapter import adapt as adapt_script_data
+from consultation_script_builder import build_script_sections
+from consultation_script_pdf_builder import build_pdf as build_script_pdf
+
 # URL вебхука Сценария 1 в Make.com ("Мгновенное уведомление мне + PDF на
 # Диск") — после генерации PDF этот сервис сам отправляет туда готовый
 # результат (report_number, контакты клиента, PDF в base64), а дальше Make
@@ -380,12 +388,27 @@ def generate_report():
         pdf_bytes = buf.getvalue()
         pdf_base64 = base64.b64encode(pdf_bytes).decode("ascii")
 
-        forward_to_make(client_response, pdf_base64)
+        # --- Скрипт консультации для Игоря (доп. к клиентскому Отчёту) ---
+        # Обёрнуто в try/except: ошибка сборки Скрипта НЕ должна ронять ответ
+        # с уже готовым клиентским Отчётом — это дополнительная, не
+        # критичная для клиента часть.
+        script_pdf_base64 = None
+        try:
+            adapted = adapt_script_data(result, client_response, data)
+            sections = build_script_sections(**adapted)
+            script_buf = io.BytesIO()
+            build_script_pdf(sections, adapted["qualification"], adapted["stage_name"], script_buf)
+            script_pdf_base64 = base64.b64encode(script_buf.getvalue()).decode("ascii")
+        except Exception as e:
+            print(f"Скрипт консультации НЕ собран (не критично для клиента): {e}")
+
+        forward_to_make(client_response, pdf_base64, script_pdf_base64)
 
         return jsonify({
             "ok": True,
             "report_number": report_number,
             "pdf_base64": pdf_base64,
+            "script_pdf_base64": script_pdf_base64,  # None, если сборка не удалась — см. лог
             "diagnose_result": result,
         })
 
@@ -393,7 +416,7 @@ def generate_report():
         return jsonify({"ok": False, "error": str(e)}), 400
 
 
-def forward_to_make(client_response, pdf_base64):
+def forward_to_make(client_response, pdf_base64, script_pdf_base64=None):
     """
     Отправляет готовый отчёт на вебхук Сценария 1 в Make.com — тот кладёт
     PDF на Google Диск, пишет строку в Google Таблицу и шлёт письмо-
@@ -401,6 +424,16 @@ def forward_to_make(client_response, pdf_base64):
     клиент на сайте всё равно должен увидеть экран "Заключение" (PDF уже
     успешно создан) — потерю доставки лучше разбирать отдельно по логам
     Render, чем ронять весь ответ пользователю.
+
+    script_pdf_base64: Скрипт консультации ДЛЯ ИГОРЯ, не для клиента.
+    ⚠️ ВАЖНО для настройки Make: поле script_pdf_base64 добавлено в payload,
+    но по умолчанию Сценарий 1 его не использует (Make игнорирует
+    незамапленные поля webhook'а). Чтобы Скрипт реально доходил до Игоря,
+    нужно ВРУЧНУЮ добавить в Сценарий 1 (или в отдельный новый сценарий)
+    шаг сохранения этого поля на Google Диск / отправки на
+    fenix.checkup.report@gmail.com — это НЕ то же самое письмо/папка, что
+    для клиентского Отчёта, и его НЕЛЬЗЯ подключать к Сценариям 2/3
+    (отправка клиенту) ни в каком виде.
     """
     q = client_response["qualification"]
     payload = {
@@ -411,6 +444,7 @@ def forward_to_make(client_response, pdf_base64):
         "phone": q.get("phone", ""),
         "diagnosis_date": q["diagnosis_date"],
         "pdf_base64": pdf_base64,
+        "script_pdf_base64": script_pdf_base64 or "",
     }
     try:
         resp = requests.post(MAKE_SC1_WEBHOOK_URL, json=payload, timeout=25)
