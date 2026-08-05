@@ -504,6 +504,20 @@ def create_payment_link():
         price = get_diagnostic_price(stage_id)
         order_id = uuid.uuid4().hex[:12]
 
+        # URL, куда Продамус вернёт клиента после оплаты. Раньше был жёстко
+        # зашит как голый https://fenix-lab.ru/ — этого достаточно ТОЛЬКО
+        # если оплата всегда проходит в отдельном попапе (тот сам закрывается
+        # через /payment-status, реальный urlSuccess клиент почти не видит).
+        # Но если попап по какой-то причине заблокирован браузером и Опросник
+        # переходит на резервный путь (та же вкладка) — клиента нужно вернуть
+        # именно на страницу с Опросником (там есть код восстановления
+        # состояния, см. tryResumeFromPaymentRedirect() в Опроснике), а не на
+        # случайную домашнюю страницу сайта, откуда прогресс было не вернуть
+        # (обнаружено на реальном тесте 05.08.2026). Если фронтенд не передал
+        # return_url (старая версия Опросника) — используем прежний адрес
+        # как безопасный запасной вариант.
+        return_url = payload.get("return_url") or "https://fenix-lab.ru/"
+
         data = {
             "order_id": order_id,
             "customer_phone": normalize_phone(payload.get("phone", "")),
@@ -522,8 +536,8 @@ def create_payment_link():
             # именно для этой платёжной ссылки. Без этого клиента после
             # оплаты редиректило на страницу логина LMS вместо того, чтобы
             # попап Опросника закрылся сам через /payment-status.
-            "urlSuccess": "https://fenix-lab.ru/",
-            "urlReturn": "https://fenix-lab.ru/",
+            "urlSuccess": return_url,
+            "urlReturn": return_url,
         }
         data["signature"] = prodamus_sign(data, PRODAMUS_SECRET_KEY)
 
