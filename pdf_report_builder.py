@@ -443,20 +443,56 @@ def para(text, style="Body"):
     return Paragraph(text, styles[style])
 
 
+def header_with_body(header_text, body_text, header_style="H3", body_style="Body"):
+    """H3-заголовок + следующий за ним контент, гарантированно на одной
+    странице (KeepTogether) — без этого заголовок мог остаться внизу
+    страницы в одиночестве, а сам контент "оторваться" на следующую
+    (обнаружено на реальном Отчёте 05.08.2026, исправлено везде по файлу).
+    body_text: либо готовый Flowable (Table и т.п.), либо текст — если текст
+    содержит несколько абзацев (разделены \\n\\n), с заголовком группируется
+    только ПЕРВЫЙ абзац (остальные добавляются в story отдельно, обычным
+    потоком, вызывающей стороной) — чтобы не заставлять ReportLab держать
+    вместе весь длинный блок целиком (что может создать куда более странные
+    разрывы, чем исходная проблема)."""
+    if hasattr(body_text, "wrap"):  # уже Flowable (Table, Paragraph, ...)
+        return KeepTogether([para(header_text, header_style), body_text])
+    return KeepTogether([para(header_text, header_style), para(body_text, body_style)])
+
+
+def append_header_with_paragraphs(story, header_text, full_text, header_style="H3", body_style="Body"):
+    """Как header_with_body(), но для текста из нескольких абзацев (\\n\\n) —
+    заголовок группируется только с первым абзацем, остальные добавляются
+    в story как обычно (см. docstring header_with_body)."""
+    blocks = [b for b in full_text.split("\n\n") if b.strip()]
+    if not blocks:
+        story.append(para(header_text, header_style))
+        return
+    story.append(KeepTogether([para(header_text, header_style), para(blocks[0], body_style)]))
+    for block in blocks[1:]:
+        story.append(para(block, body_style))
+
+
 def markdown_lite_to_flowables(text):
     """Простая конвертация текста из report_text_generator.py (## / ### / **bold**) во flowables."""
+    blocks = [b.strip() for b in text.split("\n\n") if b.strip()]
     flow = []
-    for block in text.split("\n\n"):
-        block = block.strip()
-        if not block:
-            continue
+    i = 0
+    while i < len(blocks):
+        block = blocks[i]
         if block.startswith("## "):
             flow.append(para(block[3:], "H2"))
         elif block.startswith("### "):
-            flow.append(para(block[4:], "H3"))
+            # Заголовок группируется со следующим блоком, чтобы не остаться
+            # в одиночестве внизу страницы при разбиении на страницы.
+            if i + 1 < len(blocks) and not blocks[i + 1].startswith(("## ", "### ")):
+                flow.append(KeepTogether([para(block[4:], "H3"), para(blocks[i + 1], "Body")]))
+                i += 1
+            else:
+                flow.append(para(block[4:], "H3"))
         else:
             block = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', block)
             flow.append(para(block, "Body"))
+        i += 1
     return flow
 
 
@@ -657,7 +693,6 @@ def build_story(client, result, data):
     full_stage = next(st for st in data["stages"]["stages"] if st["id"] == stage_id)
     TABLE_FONT = 13  # минимум Body(10.5) + 2
     fte_lo, fte_hi = full_stage["fte_range"]
-    story.append(para("Предоставленная информация", "H3"))
     info_table = Table([
         ["Кол-во сотрудников (текущее)", str(fte)],
         ["Кол-во сотрудников (год назад)", str(client["qualification"]["employeesYearAgo"])],
@@ -670,9 +705,8 @@ def build_story(client, result, data):
         ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
     ]))
     info_table.hAlign = "LEFT"
-    story.append(info_table)
+    story.append(KeepTogether([para("Предоставленная информация", "H3"), info_table]))
     story.append(Spacer(1, 4 * mm))
-    story.append(para("Данные по Стадии роста", "H3"))
     stage_table = Table([
         ["Текущая Стадия", f'{stage_id} ({fte_lo} – {fte_hi} сотрудников)'],
         ["Название Стадии", stage["stage_name"]],
@@ -688,16 +722,13 @@ def build_story(client, result, data):
         ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
     ]))
     stage_table.hAlign = "LEFT"
-    story.append(stage_table)
+    story.append(KeepTogether([para("Данные по Стадии роста", "H3"), stage_table]))
     story.append(Spacer(1, 6 * mm))
-    story.append(para("РЕЗЮМЕ", "H3"))
-    story.append(para(data["stage_level_report_texts"][s]["РЕЗЮМЕ"]))
+    story.append(KeepTogether([para("РЕЗЮМЕ", "H3"), para(data["stage_level_report_texts"][s]["РЕЗЮМЕ"])]))
     story.append(PageBreak())
-    story.append(para("ВЫВОДЫ", "H3"))
     critical_gaps = find_critical_gaps(result, data)
     vyvody = rtg.render_section1_vyvody(result, company, data["stages"], has_critical_gaps=bool(critical_gaps))
-    for block in vyvody.split("\n\n"):
-        story.append(para(block))
+    append_header_with_paragraphs(story, "ВЫВОДЫ", vyvody)
     story.append(PageBreak())
 
     # ---------- Разделы 2-6 (Поток А) ----------
@@ -897,10 +928,8 @@ def build_story(client, result, data):
         story.append(Spacer(1, 3 * mm))
         story.append(table)
         story.append(Spacer(1, 4 * mm))
-        story.append(para(subtitle_label, "H3"))
-        story.append(para(block["целевое_значение_объяснение"]))
-        story.append(para("ВЫВОДЫ", "H3"))
-        story.append(para(vyvody_text))
+        story.append(header_with_body(subtitle_label, block["целевое_значение_объяснение"]))
+        story.append(header_with_body("ВЫВОДЫ", vyvody_text))
         story.append(PageBreak())
 
     # ---------- Раздел 6: Стили управления (особая структура — см. пояснение в чате) ----------
@@ -914,18 +943,15 @@ def build_story(client, result, data):
     ranking = rtg.render_natural_styles_ranking(cd["management_styles_scores"], cd["management_styles"])
     for style, score, label in ranking:
         title = f"{style} - {score} баллов" + (f" ({label})" if label else "")
-        story.append(para(title, "StyleTitle"))
-        story.append(para(rtg.MANAGEMENT_STYLE_DESCRIPTIONS[style]))
+        story.append(header_with_body(title, rtg.MANAGEMENT_STYLE_DESCRIPTIONS[style], header_style="StyleTitle"))
         story.append(Spacer(1, 2 * mm))
 
     styles6_block = data["stage_level_report_texts"][s]["Стили управления"]
     styles6_table = management_styles_table(cd["management_styles"], targets["management_styles"][s])
     story.append(styles6_table)
     story.append(Spacer(1, 4 * mm))
-    story.append(para("ЦЕЛЕВОЕ СОЧЕТАНИЕ ДЛЯ ЭТОЙ СТАДИИ", "H3"))
-    story.append(para(styles6_block["целевое_значение_объяснение"]))
-    story.append(para("ВЫВОДЫ", "H3"))
-    story.append(para(rtg.render_management_styles_vyvody(
+    story.append(header_with_body("ЦЕЛЕВОЕ СОЧЕТАНИЕ ДЛЯ ЭТОЙ СТАДИИ", styles6_block["целевое_значение_объяснение"]))
+    story.append(header_with_body("ВЫВОДЫ", rtg.render_management_styles_vyvody(
         cd["management_styles"], targets["management_styles"][s], styles6_block)))
     story.append(PageBreak())
     story.extend(section_header(7, "Классические вызовы"))
@@ -1017,7 +1043,6 @@ def build_story(client, result, data):
             pct_by_area[area].append(pct)
 
     for area, rules in rules_struct.items():
-        story.append(para(area, "H3"))
         rows = [["Правило", "Стадия", Paragraph("%<br/>выполнения", pct_header_style)]]
         cell_colors = []
         for i, rule in enumerate(rules):
@@ -1043,13 +1068,13 @@ def build_story(client, result, data):
             style_cmds.append(("BACKGROUND", (2, i + 1), (2, i + 1), c))
             style_cmds.append(("TEXTCOLOR", (2, i + 1), (2, i + 1), WHITE))
         rt.setStyle(TableStyle(style_cmds))
-        story.append(rt)
+        story.append(header_with_body(area, rt))
         story.append(Spacer(1, 3 * mm))
 
     if critical_gaps:
         story.append(Spacer(1, 4 * mm))
-        story.append(para("КРИТИЧЕСКИЕ УПУЩЕНИЯ", "H3"))
-        story.append(para(
+        story.append(header_with_body(
+            "КРИТИЧЕСКИЕ УПУЩЕНИЯ",
             "Следующие Правила закрепились в Вашем бизнесе с предыдущих Стадий, но так и "
             "остаются практически невыполненными:"
         ))
@@ -1065,7 +1090,6 @@ def build_story(client, result, data):
         return TRAFFIC[20]
 
     story.append(Spacer(1, 4 * mm))
-    story.append(para("ВЫВОДЫ", "H3"))
 
     stage_rows = [["Стадия", "% выполнения"]]
     stage_style_cmds = [
@@ -1124,7 +1148,7 @@ def build_story(client, result, data):
         ("VALIGN", (0, 0), (-1, -1), "TOP"), ("LEFTPADDING", (0, 0), (-1, -1), 0),
         ("RIGHTPADDING", (0, 0), (-1, -1), 0), ("TOPPADDING", (0, 0), (-1, -1), 0),
     ]))
-    story.append(two_col)
+    story.append(header_with_body("ВЫВОДЫ", two_col))
     story.append(PageBreak())
 
     # ---------- Раздел 10: КСЭ справка ----------
@@ -1266,16 +1290,24 @@ def build_story(client, result, data):
         "НАДСТРОЙКА": colors.HexColor("#E9BD41"),
     }
     kse_text = rtg.render_section11_kse_list(result, client["challenge_scores"], data)
-    for block in kse_text.split("\n\n"):
-        block = block.strip()
-        if not block:
-            continue
+    blocks = [b.strip() for b in kse_text.split("\n\n") if b.strip()]
+    i = 0
+    while i < len(blocks):
+        block = blocks[i]
         if block.startswith("## "):
             title = block[3:].strip()
             story.append(SectionBanner(title, height=13 * mm - 4, bg_color=TIER_BANNER_COLORS.get(title)))
             story.append(Spacer(1, 4 * mm))
         elif block.startswith("### "):
-            story.append(para(block[4:], "H3"))
+            # Заголовок КСЭ группируется со следующим блоком (обоснование
+            # "Данные диагностики показывают...") — без этого заголовок мог
+            # остаться в одиночестве внизу страницы (обнаружено 05.08.2026).
+            kse_title = block[4:]
+            if i + 1 < len(blocks) and not blocks[i + 1].startswith(("## ", "### ")):
+                story.append(header_with_body(kse_title, blocks[i + 1]))
+                i += 1  # следующий блок уже использован
+            else:
+                story.append(para(kse_title, "H3"))
         elif block.startswith("→ Закрывает"):
             m = re.search(r'«(.+?)»', block)
             program_name = m.group(1) if m else ""
@@ -1283,6 +1315,7 @@ def build_story(client, result, data):
         else:
             block = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', block)
             story.append(para(block, "Body"))
+        i += 1
     story.append(PageBreak())
 
     # ---------- Раздел 12 ----------
@@ -1305,10 +1338,6 @@ def build_story(client, result, data):
             continue
         title, tier_intro = rtg.TIER_HEADERS[tier_key]
         tier_intro = tier_intro.rstrip(".") + ":"
-        story.append(SectionBanner(title, height=13 * mm - 4, bg_color=TIER_BANNER_COLORS.get(title)))
-        story.append(Spacer(1, 4 * mm))
-        story.append(para(tier_intro))
-        story.append(Spacer(1, 3 * mm))
 
         table_rows = [["Ключевой системный элемент к внедрению", "Консалтинговая программа"]]
         for kse in tier_rows:
@@ -1326,14 +1355,14 @@ def build_story(client, result, data):
             tier_table_style.append(("BACKGROUND", (0, i), (-1, i), band))
         tier_table = Table(table_rows, colWidths=[85 * mm, 85 * mm], style=TableStyle(tier_table_style))
         tier_table.hAlign = "LEFT"
-        story.append(tier_table)
+        story.append(KeepTogether([
+            SectionBanner(title, height=13 * mm - 4, bg_color=TIER_BANNER_COLORS.get(title)),
+            Spacer(1, 4 * mm), para(tier_intro), Spacer(1, 3 * mm), tier_table,
+        ]))
         story.append(Spacer(1, 5 * mm))
 
     # блок "Альтернативный вариант" — только если клиенту подходит бандл "Возрождение малого бизнеса"
     if rtg.render_section12_3_bundle_fork(result, data) is not None:
-        story.append(Spacer(1, 4 * mm))
-        story.append(SectionBanner("Альтернативный вариант", height=13 * mm - 4,
-                                    bg_color=colors.HexColor("#703C65")))
         story.append(Spacer(1, 4 * mm))
 
         bundle = data["consulting_programs"]["bundle_programs"]["Возрождение малого бизнеса"]
@@ -1344,7 +1373,10 @@ def build_story(client, result, data):
             for k in (plan_kse & bundle_kse)
         )
 
-        story.append(para(ALT_VARIANT_TEXT_INTRO))
+        story.append(KeepTogether([
+            SectionBanner("Альтернативный вариант", height=13 * mm - 4, bg_color=colors.HexColor("#703C65")),
+            Spacer(1, 4 * mm), para(ALT_VARIANT_TEXT_INTRO),
+        ]))
         programs_list_html = "<br/>".join(f'• {p}' for p in matched_programs)
         story.append(para(programs_list_html))
         story.append(Spacer(1, 3 * mm))
