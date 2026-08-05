@@ -201,4 +201,6 @@ def adapt(diagnose_result, client_response, data, payload=None, top_n_part2=2):
         "flow_a": flow_a,
         "all_kse_ordered": all_kse_ordered,
         "tier_programs": tier_programs,
+        "flow_b": diagnose_result["поток_б"],
+        "stage_id": stage_id,
     }
