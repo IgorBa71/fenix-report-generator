@@ -51,6 +51,27 @@ from script_adapter import adapt as adapt_script_data
 from consultation_script_builder import build_script_sections
 from consultation_script_pdf_builder import build_pdf as build_script_pdf
 
+# Презентация для консультации (для Игоря, показывается клиенту на экране) —
+# тоже генерируется ДОПОЛНИТЕЛЬНО, из тех же данных. Раньше требовала Node.js
+# рядом с Python (pptxgenjs) — переписана целиком на python-pptx 06.08.2026,
+# чтобы не тащить второй рантайм на Render. Обёрнута в try/except по той же
+# причине, что и Скрипт — сборка Презентации никогда не должна ронять ответ
+# с уже готовым Отчётом.
+from pptx_data_export import export_pptx_data
+from pptx_presentation_builder import new_presentation
+from pptx_slides import (
+    build_slide_cover, build_slide_agenda, build_slide_your_words, build_slide_reasons,
+    build_slide_growth_rules, build_slide_kse_concept, build_slide_symptoms,
+    build_slide_maturity_top5, build_slide_priority_chain,
+    build_slide_cost_only, build_slide_full_contrast, build_slide_how_to_reach,
+    build_slide_kse_list_repeat, build_slide_what_order, build_slide_house,
+    build_slide_house_continuation, build_slide_how_to_implement,
+    build_slide_what_is_program, build_slide_program_model, build_slide_program_model_practice,
+    build_slide_programs_foundation, build_slide_programs_core, build_slide_programs_superstructure,
+    build_slide_guarantee, build_slide_loyalty_program, build_slide_bundle_fork,
+    build_slide_closing, build_slide_mission,
+)
+
 # URL вебхука Сценария 1 в Make.com ("Мгновенное уведомление мне + PDF на
 # Диск") — после генерации PDF этот сервис сам отправляет туда готовый
 # результат (report_number, контакты клиента, PDF в base64), а дальше Make
@@ -402,13 +423,53 @@ def generate_report():
         except Exception as e:
             print(f"Скрипт консультации НЕ собран (не критично для клиента): {e}")
 
-        forward_to_make(client_response, pdf_base64, script_pdf_base64)
+        # --- Презентация для консультации (доп. к Отчёту и Скрипту) ---
+        presentation_base64 = None
+        try:
+            pptx_data = export_pptx_data(result, client_response, data)
+            pres = new_presentation()
+            build_slide_cover(pres, pptx_data)
+            build_slide_agenda(pres, pptx_data)
+            build_slide_your_words(pres, pptx_data)
+            build_slide_reasons(pres, pptx_data)
+            build_slide_growth_rules(pres, pptx_data)
+            build_slide_kse_concept(pres, pptx_data)
+            build_slide_symptoms(pres, pptx_data)
+            build_slide_maturity_top5(pres, pptx_data)
+            build_slide_priority_chain(pres, pptx_data)
+            build_slide_cost_only(pres, pptx_data)
+            build_slide_full_contrast(pres, pptx_data)
+            build_slide_how_to_reach(pres, pptx_data)
+            build_slide_kse_list_repeat(pres, pptx_data)
+            build_slide_what_order(pres, pptx_data)
+            build_slide_house(pres, pptx_data)
+            build_slide_how_to_implement(pres, pptx_data)
+            build_slide_what_is_program(pres, pptx_data)
+            build_slide_program_model(pres, pptx_data)
+            build_slide_program_model_practice(pres, pptx_data)
+            build_slide_house_continuation(pres, pptx_data)
+            build_slide_programs_foundation(pres, pptx_data)
+            build_slide_programs_core(pres, pptx_data)
+            build_slide_programs_superstructure(pres, pptx_data)
+            build_slide_bundle_fork(pres, pptx_data)
+            build_slide_guarantee(pres, pptx_data)
+            build_slide_loyalty_program(pres, pptx_data)
+            build_slide_closing(pres, pptx_data)
+            build_slide_mission(pres, pptx_data)
+            pptx_buf = io.BytesIO()
+            pres.save(pptx_buf)
+            presentation_base64 = base64.b64encode(pptx_buf.getvalue()).decode("ascii")
+        except Exception as e:
+            print(f"Презентация НЕ собрана (не критично для клиента): {e}")
+
+        forward_to_make(client_response, pdf_base64, script_pdf_base64, presentation_base64)
 
         return jsonify({
             "ok": True,
             "report_number": report_number,
             "pdf_base64": pdf_base64,
             "script_pdf_base64": script_pdf_base64,  # None, если сборка не удалась — см. лог
+            "presentation_base64": presentation_base64,  # None, если сборка не удалась — см. лог
             "diagnose_result": result,
         })
 
@@ -416,7 +477,7 @@ def generate_report():
         return jsonify({"ok": False, "error": str(e)}), 400
 
 
-def forward_to_make(client_response, pdf_base64, script_pdf_base64=None):
+def forward_to_make(client_response, pdf_base64, script_pdf_base64=None, presentation_base64=None):
     """
     Отправляет готовый отчёт на вебхук Сценария 1 в Make.com — тот кладёт
     PDF на Google Диск, пишет строку в Google Таблицу и шлёт письмо-
@@ -425,15 +486,15 @@ def forward_to_make(client_response, pdf_base64, script_pdf_base64=None):
     успешно создан) — потерю доставки лучше разбирать отдельно по логам
     Render, чем ронять весь ответ пользователю.
 
-    script_pdf_base64: Скрипт консультации ДЛЯ ИГОРЯ, не для клиента.
-    ⚠️ ВАЖНО для настройки Make: поле script_pdf_base64 добавлено в payload,
-    но по умолчанию Сценарий 1 его не использует (Make игнорирует
-    незамапленные поля webhook'а). Чтобы Скрипт реально доходил до Игоря,
-    нужно ВРУЧНУЮ добавить в Сценарий 1 (или в отдельный новый сценарий)
-    шаг сохранения этого поля на Google Диск / отправки на
-    fenix.checkup.report@gmail.com — это НЕ то же самое письмо/папка, что
-    для клиентского Отчёта, и его НЕЛЬЗЯ подключать к Сценариям 2/3
-    (отправка клиенту) ни в каком виде.
+    script_pdf_base64 / presentation_base64: Скрипт консультации и
+    Презентация — ОБА для Игоря, не для клиента.
+    ⚠️ ВАЖНО для настройки Make: оба поля добавлены в payload, но по
+    умолчанию Сценарий 1 их не использует (Make игнорирует незамапленные
+    поля webhook'а). Чтобы они реально доходили до Игоря, нужно ВРУЧНУЮ
+    добавить в Сценарий 1 (или в отдельный новый сценарий) шаги сохранения
+    на Google Диск / отправки на fenix.checkup.report@gmail.com — это НЕ то
+    же самое письмо/папка, что для клиентского Отчёта, и их НЕЛЬЗЯ
+    подключать к Сценариям 2/3 (отправка клиенту) ни в каком виде.
     """
     q = client_response["qualification"]
     payload = {
@@ -445,6 +506,7 @@ def forward_to_make(client_response, pdf_base64, script_pdf_base64=None):
         "diagnosis_date": q["diagnosis_date"],
         "pdf_base64": pdf_base64,
         "script_pdf_base64": script_pdf_base64 or "",
+        "presentation_base64": presentation_base64 or "",
     }
     try:
         resp = requests.post(MAKE_SC1_WEBHOOK_URL, json=payload, timeout=25)
