@@ -99,7 +99,8 @@ SLIDE_REGISTRY = {
     "programs_superstructure": (23, "Инвестиция и результат — Надстройка"),
     "bundle_fork": (24, "«Возрождение малого бизнеса»"),
     "guarantee": (25, "Страховка от сомнений"),
-    "closing": (26, "Следующие шаги"),
+    "loyalty_program": (26, "Программа лояльности"),
+    "closing": (27, "Следующие шаги"),
 }
 
 
@@ -981,11 +982,64 @@ HOUSE_METAPHOR_TEXT = (
 )
 
 GUARANTEE_TEXT = (
-    "Кстати, важный момент — Страховка от сомнений. Мы полностью уверены в "
-    "результате: если после первой рабочей сессии Программы Вы не увидите "
+    "Мы полностью уверены в результате.\n"
+    "Поэтому, если после первой рабочей сессии Программы Вы не увидите "
     "реальной пользы, Вы получаете 100% возврат средств без каких-либо "
     "дополнительных условий."
 )
+
+LOYALTY_PROGRAM_INTRO = (
+    "Она не связана с порядком внедрения Системных элементов — этот Порядок "
+    "определяется только структурой «Дома», о которой мы говорили ранее.\n"
+    "Программа лояльности — это отдельное правило, которое действует поверх "
+    "Порядка внедрения: каждая следующая Программа в Вашей личной "
+    "последовательности стоит дешевле предыдущей:\n"
+    "1-я Программа — по полной цене\n"
+    "2-я — минус 10%\n"
+    "3-я — минус 15%\n"
+    "4-я — минус 20%\n"
+    "5-я и каждая следующая — минус 25%\n"
+    "Это работает независимо от того, берёте Вы несколько Программ сразу или "
+    "возвращаетесь за следующей через полгода — учитывается именно то, какая "
+    "она по счёту лично для Вашей компании.\n"
+    "Вы видите Ваши цифры на слайде."
+)
+
+
+def _parse_rub(price_str):
+    """'300 000 руб.' -> 300000. Обратный парсинг уже отформатированной строки
+    цены из tier_programs — единственный источник, доступный на этом шаге
+    (см. docstring render_solution_section)."""
+    digits = re.sub(r'[^\d]', '', price_str)
+    return int(digits) if digits else 0
+
+
+LOYALTY_DISCOUNT_SCHEDULE = [0, 10, 15, 20, 25]  # с 5-й Программы и далее — всегда 25%
+
+
+def render_loyalty_program_section(all_kse_ordered, tier_programs):
+    """all_kse_ordered / tier_programs — та же структура, что и в
+    render_solution_section() (Раздел 5б). Скидка применяется к уже готовой
+    последовательности из all_kse_ordered (порядок "Дома") — сама
+    последовательность Программой лояльности не определяется, это отдельное,
+    независимое правило (см. LOYALTY_PROGRAM_INTRO). Пофамильную раскладку
+    по Программам вслух не проговариваем («Вы видите Ваши цифры на
+    слайде») — в самом тексте Скрипта только итоговая экономия."""
+    price_by_kse = {p["name"]: _parse_rub(p["price"])
+                     for programs in tier_programs.values() for p in programs}
+
+    total_full, total_disc = 0, 0
+    for i, kse in enumerate(all_kse_ordered):
+        price = price_by_kse.get(kse)
+        if price is None:
+            continue
+        discount = LOYALTY_DISCOUNT_SCHEDULE[min(i, len(LOYALTY_DISCOUNT_SCHEDULE) - 1)]
+        total_full += price
+        total_disc += round(price * (1 - discount / 100))
+
+    savings = total_full - total_disc
+    return (f'{LOYALTY_PROGRAM_INTRO}\n'
+            f'Итого, если Вы внедрите весь план целиком — Ваша экономия составит {format_rub(savings)}')
 
 TIER_ORDER = ("Фундамент", "Ядро", "Надстройка")
 
@@ -1275,8 +1329,17 @@ def render_solution_section(section9, all_kse_ordered, tier_programs, bundle_for
         lines.append(render_bundle_fork_section(bundle_fork))
 
     lines.append("")
+    lines.append("И ещё 2 важных момента в отношении Ваших инвестиций во внедрение "
+                  "недостающих Системных элементов.")
+    lines.append("Первый — это так называемая «Страховка от сомнений».")
     lines.append(slide_marker("guarantee").rstrip("\n"))
     lines.append(GUARANTEE_TEXT)
+
+    lines.append("")
+    lines.append("И второй момент, который важно проговорить отдельно — это наша "
+                  "Программа лояльности.")
+    lines.append(slide_marker("loyalty_program").rstrip("\n"))
+    lines.append(render_loyalty_program_section(all_kse_ordered, tier_programs))
 
     return "\n".join(lines)
 
