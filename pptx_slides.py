@@ -618,46 +618,57 @@ ROI_CALCULATORS = {
 }
 
 
+MAX_CARDS_PER_SLIDE = 3  # больше — карточки становятся нечитаемыми (текст
+                          # схлопывается в один символ на строку); лучше
+                          # несколько слайдов подряд, чем один нечитаемый.
+
+
 def _build_program_cards_slide(pres, data, tier_name, slide_title):
     client = data["client"]
     programs = data["tierPrograms"].get(tier_name, [])
-    slide = add_slide(pres, WHITE)
-    title(slide, slide_title)
     if not programs:
+        slide = add_slide(pres, WHITE)
+        title(slide, slide_title)
         add_textbox(slide, "— не требуется для Вашего плана", Inches(0.7), Inches(2.5), W - Inches(1.4), Inches(0.6),
                     size=16, color=DARKTEXT)
         footer(slide, client, dark=False)
         return
 
-    card_w = (W - Inches(0.7) * 2 - Inches(0.4) * (len(programs) - 1)) // len(programs)
-    card_y, card_h = Inches(1.9), Inches(4.9)
-    for i, p in enumerate(programs):
-        x = Inches(0.7) + i * (card_w + Inches(0.4))
-        add_rounded_rect(slide, x, card_y, card_w, card_h, fill_color=RGBColor(0xDE, 0xEB, 0xF7),
-                          line_color=RGBColor(0xE4, 0xE1, 0xDC), line_width_pt=1)
-        stripe = slide.shapes.add_shape(1, x, card_y, card_w, Inches(0.1))
-        stripe.fill.solid(); stripe.fill.fore_color.rgb = NAVY; stripe.line.fill.background(); stripe.shadow.inherit = False
+    chunks = [programs[i:i + MAX_CARDS_PER_SLIDE] for i in range(0, len(programs), MAX_CARDS_PER_SLIDE)]
+    for page_i, chunk in enumerate(chunks):
+        slide = add_slide(pres, WHITE)
+        page_title = slide_title if len(chunks) == 1 else f"{slide_title} ({page_i + 1}/{len(chunks)})"
+        title(slide, page_title)
 
-        add_textbox(slide, p["name"], x + Inches(0.3), card_y + Inches(0.3), card_w - Inches(0.6), Inches(0.9),
-                    size=16, color=NAVY, bold=True)
-        add_textbox(slide, "ЧТО ВЫ ПОЛУЧАЕТЕ:", x + Inches(0.3), card_y + Inches(1.3), card_w - Inches(0.6), Inches(0.3),
-                    size=10, color="9A9088", bold=True)
-        add_bullets(slide, p["outcomes"], x + Inches(0.3), card_y + Inches(1.65), card_w - Inches(0.6), Inches(2.2),
-                    size=11.5, color=DARKTEXT)
+        card_w = (W - Inches(0.7) * 2 - Inches(0.4) * (len(chunk) - 1)) // len(chunk)
+        card_y, card_h = Inches(1.9), Inches(4.9)
+        for i, p in enumerate(chunk):
+            x = Inches(0.7) + i * (card_w + Inches(0.4))
+            add_rounded_rect(slide, x, card_y, card_w, card_h, fill_color=RGBColor(0xDE, 0xEB, 0xF7),
+                              line_color=RGBColor(0xE4, 0xE1, 0xDC), line_width_pt=1)
+            stripe = slide.shapes.add_shape(1, x, card_y, card_w, Inches(0.1))
+            stripe.fill.solid(); stripe.fill.fore_color.rgb = NAVY; stripe.line.fill.background(); stripe.shadow.inherit = False
 
-        ln = slide.shapes.add_connector(1, x + Inches(0.3), card_y + Inches(3.95), x + card_w - Inches(0.3), card_y + Inches(3.95))
-        ln.line.color.rgb = RGBColor(0xD8, 0xD3, 0xCC); ln.line.width = Pt(1)
-        add_textbox(slide, f'Срок: {p["duration"]}', x + Inches(0.3), card_y + Inches(4.1), card_w - Inches(0.6), Inches(0.3),
-                    size=12, color=DARKTEXT)
-        add_textbox(slide, p["price"], x + Inches(0.3), card_y + Inches(4.4), card_w - Inches(0.6), Inches(0.4),
-                    size=20, color=TERRACOTTA, bold=True)
+            add_textbox(slide, p["name"], x + Inches(0.3), card_y + Inches(0.3), card_w - Inches(0.6), Inches(0.9),
+                        size=16, color=NAVY, bold=True)
+            add_textbox(slide, "ЧТО ВЫ ПОЛУЧАЕТЕ:", x + Inches(0.3), card_y + Inches(1.3), card_w - Inches(0.6), Inches(0.3),
+                        size=10, color="9A9088", bold=True)
+            add_bullets(slide, p["outcomes"], x + Inches(0.3), card_y + Inches(1.65), card_w - Inches(0.6), Inches(2.2),
+                        size=11.5, color=DARKTEXT)
 
-        calc_url = ROI_CALCULATORS.get(p["name"])
-        if calc_url:
-            add_textbox(slide, f'Калькулятор окупаемости инвестиций: {calc_url}',
-                        x + Inches(0.3), card_y + Inches(4.85), card_w - Inches(0.6), Inches(0.3),
-                        size=9.5, color=TEAL)
-    footer(slide, client, dark=False)
+            ln = slide.shapes.add_connector(1, x + Inches(0.3), card_y + Inches(3.95), x + card_w - Inches(0.3), card_y + Inches(3.95))
+            ln.line.color.rgb = RGBColor(0xD8, 0xD3, 0xCC); ln.line.width = Pt(1)
+            add_textbox(slide, f'Срок: {p["duration"]}', x + Inches(0.3), card_y + Inches(4.1), card_w - Inches(0.6), Inches(0.3),
+                        size=12, color=DARKTEXT)
+            add_textbox(slide, p["price"], x + Inches(0.3), card_y + Inches(4.4), card_w - Inches(0.6), Inches(0.4),
+                        size=20, color=TERRACOTTA, bold=True)
+
+            calc_url = ROI_CALCULATORS.get(p["name"])
+            if calc_url:
+                add_textbox(slide, f'Калькулятор окупаемости инвестиций: {calc_url}',
+                            x + Inches(0.3), card_y + Inches(4.85), card_w - Inches(0.6), Inches(0.3),
+                            size=9.5, color=TEAL)
+        footer(slide, client, dark=False)
 
 
 def build_slide_programs_foundation(pres, data):
