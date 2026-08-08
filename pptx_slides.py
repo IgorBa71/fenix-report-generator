@@ -231,22 +231,27 @@ def build_slide_symptoms(pres, data):
     slide = add_slide(pres, WHITE)
     title(slide, "Симптомы и корневые причины")
 
-    mid_y = Inches(3.9)
+    # Раньше нижняя голубая «вода» доходила почти до самого низа слайда и
+    # наезжала на логотип в футере — весь блок (кроме футера) поднят ближе
+    # к заголовку, а вода останавливается с явным отступом от футера.
+    tip_y = Inches(1.3)
+    mid_y = Inches(3.5)
+    water_bottom = H - Inches(0.75)
     ice_x = W // 2
 
-    water = slide.shapes.add_shape(1, 0, mid_y, W, H - mid_y - Inches(0.5))
+    water = slide.shapes.add_shape(1, 0, mid_y, W, water_bottom - mid_y)
     water.fill.solid(); water.fill.fore_color.rgb = RGBColor(0xDC, 0xEA, 0xF0); water.line.fill.background()
     water.shadow.inherit = False
 
-    tip = slide.shapes.add_shape(MSO_SHAPE.ISOSCELES_TRIANGLE, ice_x - Inches(1.6), Inches(1.75), Inches(3.2), mid_y - Inches(1.75))
+    tip = slide.shapes.add_shape(MSO_SHAPE.ISOSCELES_TRIANGLE, ice_x - Inches(1.6), tip_y, Inches(3.2), mid_y - tip_y)
     tip.fill.solid(); tip.fill.fore_color.rgb = TERRACOTTA; tip.line.fill.background(); tip.shadow.inherit = False
     tip.rotation = 180
-    add_textbox(slide, "ВИДНО СРАЗУ", Inches(2.77), Inches(1.85), Inches(2.0), Inches(0.35),
+    add_textbox(slide, "ВИДНО СРАЗУ", Inches(2.77), tip_y + Inches(0.1), Inches(2.0), Inches(0.35),
                 size=11, color=TERRACOTTA, bold=True, align=PP_ALIGN.RIGHT)
     add_textbox(slide, ["Правила роста, которые не соблюдаются", "", "Вызовы, с которыми сталкивается бизнес"],
-                Inches(1.77), Inches(2.3), Inches(3.0), Inches(1.5), size=12.5, color=DARKTEXT, align=PP_ALIGN.RIGHT)
+                Inches(1.77), tip_y + Inches(0.55), Inches(3.0), Inches(1.5), size=12.5, color=DARKTEXT, align=PP_ALIGN.RIGHT)
 
-    base_tri = slide.shapes.add_shape(MSO_SHAPE.ISOSCELES_TRIANGLE, ice_x - Inches(2.6), mid_y, Inches(5.2), Inches(2.4))
+    base_tri = slide.shapes.add_shape(MSO_SHAPE.ISOSCELES_TRIANGLE, ice_x - Inches(2.6), mid_y, Inches(5.2), Inches(2.2))
     base_tri.fill.solid(); base_tri.fill.fore_color.rgb = NAVY; base_tri.line.fill.background(); base_tri.shadow.inherit = False
     add_textbox(slide, "ГЛУБЖЕ — КОРЕНЬ", Inches(9.57), mid_y + Inches(0.3), Inches(2.5), Inches(0.35),
                 size=11, color=GOLD, bold=True)
@@ -257,13 +262,17 @@ def build_slide_symptoms(pres, data):
         slide,
         "Правила роста и Вызовы — это внешние симптомы более глубоких проблем. Именно "
         "корневые причины устраняются путём внедрения недостающих Ключевых системных элементов.",
-        Inches(0.9), H - Inches(1.1), W - Inches(1.8), Inches(0.6), size=13, italic=True,
+        Inches(0.9), H - Inches(1.35), W - Inches(1.8), Inches(0.55), size=13, italic=True,
         color="5A6B73", align=PP_ALIGN.CENTER,
     )
     footer(slide, client, dark=False)
 
 
 def build_slide_priority_chain(pres, data):
+    """Слайд №9 — полностью динамический: и левая колонка (Правила роста /
+    Вызовы / Области — до 6 строк каждая), и правая колонка (КСЭ, к которым
+    привела диагностика — от 1 до 10+ плашек) подстраивают высоту и размер
+    шрифта под реальное количество пунктов конкретного клиента."""
     client = data["client"]
     ec = data["evidenceChain"]
     slide = add_slide(pres, WHITE)
@@ -273,36 +282,73 @@ def build_slide_priority_chain(pres, data):
     right_x, right_w = Inches(8.9), Inches(3.8)
     arrow_x1, arrow_x2 = left_x + left_w + Inches(0.15), right_x - Inches(0.15)
 
-    ev_boxes = [
-        ("ПРАВИЛА РОСТА (не выполняются)", ec["growthRuleMismatches"], Inches(1.75), Inches(1.15)),
-        ("ВЫЗОВЫ (Вы отметили как острые)", ec["challenges"], Inches(3.05), Inches(1.4)),
-        ("ОБЛАСТИ БИЗНЕСА (просели)", ec["areas"], Inches(4.6), Inches(1.4)),
+    top_y = Inches(1.5)
+    bottom_y = H - Inches(0.75)
+    avail_h = bottom_y - top_y
+
+    # --- левая колонка: 3 плашки-источника, высота каждой зависит от числа
+    # пунктов внутри (до 6 строк на плашку) ---
+    ev_groups = [
+        ("ПРАВИЛА РОСТА (не выполняются)", ec.get("growthRuleMismatches") or []),
+        ("ВЫЗОВЫ (Вы отметили как острые)", ec.get("challenges") or []),
+        ("ОБЛАСТИ БИЗНЕСА (просели)", ec.get("areas") or []),
     ]
-    for label, items, y, h in ev_boxes:
+    max_items = max((len(items) for _, items in ev_groups), default=1) or 1
+    header_h = Inches(0.38)
+    left_gap_base = Inches(0.16)
+
+    def _compute_heights(bullet_sz):
+        lh = int(Inches(bullet_sz / 72 * 1.55))
+        hs = [header_h + Inches(0.12) + lh * max(len(items), 1) + Inches(0.12) for _, items in ev_groups]
+        return hs, lh
+
+    bullet_size = 11.5 if max_items <= 4 else max(8.0, 11.5 - (max_items - 4) * 0.55)
+    heights, line_h = _compute_heights(bullet_size)
+    left_gap = left_gap_base
+    total_h = sum(heights) + left_gap * (len(ev_groups) - 1)
+    # Сначала жмём шрифт (до 7pt) — тогда текст и плашка остаются в
+    # согласии друг с другом. Плашки целиком сжимаем только в
+    # экстремальном случае, когда даже 7pt не помогает.
+    while total_h > avail_h and bullet_size > 7.0:
+        bullet_size -= 0.5
+        heights, line_h = _compute_heights(bullet_size)
+        total_h = sum(heights) + left_gap * (len(ev_groups) - 1)
+    if total_h > avail_h:
+        scale = avail_h / total_h
+        heights = [int(h * scale) for h in heights]
+        left_gap = int(left_gap * scale)
+
+    y = top_y
+    box_positions = []
+    for (label, items), h in zip(ev_groups, heights):
         add_rounded_rect(slide, left_x, y, left_w, h, fill_color=OFFWHITE, line_color=TERRACOTTA, line_width_pt=1.5, radius=0.06)
-        add_textbox(slide, label, left_x + Inches(0.25), y + Inches(0.12), left_w - Inches(0.5), Inches(0.3),
+        add_textbox(slide, label, left_x + Inches(0.25), y + Inches(0.1), left_w - Inches(0.5), header_h,
                     size=10.5, color=TERRACOTTA, bold=True)
-        add_bullets(slide, items, left_x + Inches(0.25), y + Inches(0.45), left_w - Inches(0.5), h - Inches(0.55),
-                    size=11.5, color=DARKTEXT)
+        add_bullets(slide, items or ["—"], left_x + Inches(0.25), y + header_h, left_w - Inches(0.5), h - header_h - Inches(0.08),
+                    size=bullet_size, color=DARKTEXT)
+        box_positions.append((y, h))
+        y += h + left_gap
 
-    kse_boxes = [
-        ("Критерии роста бизнеса", Inches(1.9)),
-        ("Сильная Управленческая команда", Inches(3.35)),
-        ("Структура Развития бизнеса", Inches(4.8)),
-    ]
-    for name, y in kse_boxes:
-        add_rounded_rect(slide, right_x, y, right_w, Inches(1.15), fill_color=NAVY)
-        add_textbox(slide, name, right_x + Inches(0.2), y, right_w - Inches(0.4), Inches(1.15),
-                    size=13, color=GOLD, bold=True, align=PP_ALIGN.CENTER, anchor=MSO_ANCHOR.MIDDLE)
+    # --- правая колонка: реальные КСЭ, к которым привела эта цепочка —
+    # от 1 до 10+ плашек, высота и шрифт подстраиваются под количество ---
+    related_kse = ec.get("relatedKse") or data["allKseOrdered"][:3]
+    n_kse = max(len(related_kse), 1)
+    kse_gap = min(Inches(0.2), int(avail_h / n_kse * 0.18))
+    kse_h = min(Inches(1.15), (avail_h - kse_gap * (n_kse - 1)) // n_kse)
+    kse_font = 13 if n_kse <= 3 else max(9.0, 13 - (n_kse - 3) * 0.7)
 
-    arrows = [
-        (Inches(1.75) + Inches(1.15) // 2, Inches(1.9) + Inches(1.15) // 2),
-        (Inches(3.05) + Inches(1.4) // 2, Inches(3.35) + Inches(1.15) // 2),
-        (Inches(4.6) + Inches(1.4) // 2, Inches(3.35) + Inches(1.15) // 2),
-        (Inches(4.6) + Inches(1.4) // 2, Inches(4.8) + Inches(1.15) // 2),
-    ]
-    for from_y, to_y in arrows:
-        add_line_arrow(slide, arrow_x1, from_y, arrow_x2, to_y, RGBColor(0xB9, 0xAF, 0xA5), 1.75)
+    ry = top_y
+    right_bottom = ry
+    for name in related_kse:
+        add_rounded_rect(slide, right_x, ry, right_w, kse_h, fill_color=NAVY)
+        add_textbox(slide, name, right_x + Inches(0.2), ry, right_w - Inches(0.4), kse_h,
+                    size=kse_font, color=GOLD, bold=True, align=PP_ALIGN.CENTER, anchor=MSO_ANCHOR.MIDDLE)
+        ry += kse_h + kse_gap
+        right_bottom = ry - kse_gap
+
+    right_center_y = top_y + (right_bottom - top_y) // 2
+    for by, bh in box_positions:
+        add_line_arrow(slide, arrow_x1, by + bh // 2, arrow_x2, right_center_y, RGBColor(0xB9, 0xAF, 0xA5), 1.75)
 
     footer(slide, client, dark=False)
 
@@ -360,8 +406,12 @@ def build_slide_how_to_reach(pres, data):
 
 
 def build_slide_kse_list_repeat(pres, data):
+    """Слайд №13 — ВЕСЬ список рекомендованных клиенту КСЭ (не top-N обрезка):
+    это важно, т.к. количество Программ на слайдах №20-23 («Дом» / карточки
+    по ярусам) должно 1-в-1 совпадать с этим списком — оба берутся из
+    allKseOrdered. На Стадиях 6-7 в Фундаменте пунктов может быть до 10."""
     client = data["client"]
-    priority = data.get("topKseForSlide13") or data["allKseOrdered"][:3]
+    priority = data.get("allKseOrdered") or []
     slide = add_slide(pres, RGBColor(0xF7, 0xF5, 0xF2))
     title(slide, "Результаты диагностики")
     add_textbox(slide, "Необходимо внедрение следующих Ключевых системных элементов:",
@@ -369,9 +419,12 @@ def build_slide_kse_list_repeat(pres, data):
 
     start_y, end_y = Inches(2.2), H - Inches(0.9)
     avail_h = end_y - start_y
-    n = len(priority)
-    gap = min(Inches(0.3), int(avail_h / n * 0.25))
+    n = max(len(priority), 1)
+    gap = min(Inches(0.3), int(avail_h / n * 0.22))
     card_h = (avail_h - gap * (n - 1)) // n
+    # Шрифт названия и кружка-номера плавно уменьшаются с ростом количества
+    # плашек, чтобы 10 пунктов (Стадии 6-7, Фундамент) не схлопывались.
+    name_size = max(11.0, min(18.0, 18.0 - (n - 5) * 0.9)) if n > 5 else 18.0
     for i, name in enumerate(priority):
         y = start_y + i * (card_h + gap)
         add_rounded_rect(slide, Inches(1.5), y, W - Inches(3.0), card_h, fill_color=NAVY)
@@ -383,7 +436,7 @@ def build_slide_kse_list_repeat(pres, data):
                     size=min(22, circle_d_in * 32), color=WHITE, bold=True,
                     align=PP_ALIGN.CENTER, anchor=MSO_ANCHOR.MIDDLE)
         add_textbox(slide, name, Inches(2.8), y, W - Inches(5.0), card_h,
-                    size=14 if n > 5 else 18, color=GOLD, bold=True, anchor=MSO_ANCHOR.MIDDLE)
+                    size=name_size, color=GOLD, bold=True, anchor=MSO_ANCHOR.MIDDLE)
     footer(slide, client, dark=False)
 
 
@@ -451,18 +504,81 @@ def build_slide_house(pres, data):
 
 
 def build_slide_house_continuation(pres, data):
+    """Слайд №20 — в отличие от build_slide_house (общая, концептуальная
+    версия «Дома» с короткими фиксированными описаниями ярусов), здесь
+    названия Программ клиент-специфичны и их может быть до 10 на ярус
+    (Фундамент на Стадиях 6-7). Поэтому раскладка отличается: плашки ярусов
+    на всю ширину слайда, названия Программ — в 2 колонки, высота плашки
+    динамически подстраивается под число Программ в ней."""
     client = data["client"]
     tier_programs = data["tierPrograms"]
     slide = add_slide(pres, WHITE)
     title(slide, "Порядок внедрения Программ")
 
-    def note(tier_name):
-        programs = tier_programs.get(tier_name, [])
-        if not programs:
-            return "— не требуется для Вашего плана", False
-        return "\n".join(f'•  {p["name"]}' for p in programs), True
+    tiers = [
+        ("НАДСТРОЙКА", "3", RGBColor(0xCB, 0xB7, 0x9A), NAVY, tier_programs.get("Надстройка", [])),
+        ("ЯДРО", "2", TEAL, WHITE, tier_programs.get("Ядро", [])),
+        ("ФУНДАМЕНТ", "1", NAVY, WHITE, tier_programs.get("Фундамент", [])),
+    ]
 
-    _draw_house(slide, note)
+    house_x, house_w = Inches(0.7), W - Inches(1.4)
+    top_y = Inches(1.5)
+    bottom_y = H - Inches(0.85)
+    avail_h = bottom_y - top_y
+    gap = Inches(0.16)
+
+    header_h = Inches(0.42)
+    row_h_base = Inches(0.27)
+    min_tier_h = Inches(0.75)
+
+    heights = []
+    for _, _, _, _, programs in tiers:
+        n = len(programs)
+        rows = max(1, -(-n // 2)) if n else 1  # ceil(n / 2 колонки)
+        h = max(min_tier_h, header_h + rows * row_h_base + Inches(0.22))
+        heights.append(h)
+
+    total_h = sum(heights) + gap * (len(tiers) - 1)
+    if total_h > avail_h:
+        scale = avail_h / total_h
+        heights = [int(h * scale) for h in heights]
+        gap = int(gap * scale)
+        row_h_base = int(row_h_base * scale)
+
+    y = top_y
+    for (key, num, color, text_color, programs), h in zip(tiers, heights):
+        block = slide.shapes.add_shape(1, house_x, y, house_w, h)
+        block.fill.solid(); block.fill.fore_color.rgb = color
+        block.line.color.rgb = WHITE; block.line.width = Pt(2); block.shadow.inherit = False
+
+        badge_d = min(Inches(0.7), h - Inches(0.15))
+        add_rounded_rect(slide, house_x + Inches(0.25), y + Inches(0.12), badge_d, badge_d,
+                          fill_color=TERRACOTTA, line_color=WHITE, line_width_pt=2, radius=0.5)
+        add_textbox(slide, num, house_x + Inches(0.25), y + Inches(0.12), badge_d, badge_d,
+                    size=20, color=WHITE, bold=True, align=PP_ALIGN.CENTER, anchor=MSO_ANCHOR.MIDDLE)
+        add_textbox(slide, key, house_x + Inches(1.15), y + Inches(0.1), Inches(3.0), Inches(0.32),
+                    size=15, color=text_color, bold=True)
+
+        content_y = y + header_h
+        content_h = h - header_h - Inches(0.1)
+        content_x = house_x + Inches(1.15)
+        content_w = house_w - Inches(1.45)
+        if not programs:
+            add_textbox(slide, "— не требуется для Вашего плана", content_x, content_y,
+                        content_w, content_h, size=12, color=text_color)
+        else:
+            n = len(programs)
+            names = [p["name"] for p in programs]
+            col_n = max(1, -(-n // 2))
+            col1, col2 = names[:col_n], names[col_n:]
+            font_size = 12.0 if n <= 6 else max(9.0, 12.0 - (n - 6) * 0.5)
+            col_w = (content_w - Inches(0.3)) // 2
+            add_bullets(slide, col1, content_x, content_y, col_w, content_h, size=font_size, color=text_color)
+            if col2:
+                add_bullets(slide, col2, content_x + col_w + Inches(0.3), content_y, col_w, content_h,
+                            size=font_size, color=text_color)
+        y += h + gap
+
     footer(slide, client, dark=False)
 
 
@@ -653,8 +769,18 @@ def _build_program_cards_slide(pres, data, tier_name, slide_title):
                         size=16, color=NAVY, bold=True)
             add_textbox(slide, "ЧТО ВЫ ПОЛУЧАЕТЕ:", x + Inches(0.3), card_y + Inches(1.3), card_w - Inches(0.6), Inches(0.3),
                         size=10, color="9A9088", bold=True)
-            add_bullets(slide, p["outcomes"], x + Inches(0.3), card_y + Inches(1.65), card_w - Inches(0.6), Inches(2.2),
+            calc_url = ROI_CALCULATORS.get(p["name"])
+            # Если для Программы есть Калькулятор окупаемости — освобождаем
+            # немного места, сузив блок буллетов, и ставим строку с
+            # калькулятором прямо НАД разделительной линией (было: ниже цены,
+            # что вылезало за пределы карточки и наезжало на футер).
+            bullets_h = Inches(1.85) if calc_url else Inches(2.2)
+            add_bullets(slide, p["outcomes"], x + Inches(0.3), card_y + Inches(1.65), card_w - Inches(0.6), bullets_h,
                         size=11.5, color=DARKTEXT)
+            if calc_url:
+                add_textbox(slide, f'Калькулятор окупаемости инвестиций: {calc_url}',
+                            x + Inches(0.3), card_y + Inches(3.58), card_w - Inches(0.6), Inches(0.34),
+                            size=9.5, color=TEAL)
 
             ln = slide.shapes.add_connector(1, x + Inches(0.3), card_y + Inches(3.95), x + card_w - Inches(0.3), card_y + Inches(3.95))
             ln.line.color.rgb = RGBColor(0xD8, 0xD3, 0xCC); ln.line.width = Pt(1)
@@ -662,12 +788,6 @@ def _build_program_cards_slide(pres, data, tier_name, slide_title):
                         size=12, color=DARKTEXT)
             add_textbox(slide, p["price"], x + Inches(0.3), card_y + Inches(4.4), card_w - Inches(0.6), Inches(0.4),
                         size=20, color=TERRACOTTA, bold=True)
-
-            calc_url = ROI_CALCULATORS.get(p["name"])
-            if calc_url:
-                add_textbox(slide, f'Калькулятор окупаемости инвестиций: {calc_url}',
-                            x + Inches(0.3), card_y + Inches(4.85), card_w - Inches(0.6), Inches(0.3),
-                            size=9.5, color=TEAL)
         footer(slide, client, dark=False)
 
 
@@ -723,7 +843,17 @@ def build_slide_loyalty_program(pres, data):
     table_x, table_y, table_w = Inches(0.7), Inches(1.75), Inches(11.93)
     col_w = [Inches(0.55), Inches(4.6), Inches(2.2), Inches(1.3), Inches(3.28)]
     n_rows = len(items) + 1
-    row_h = Inches(0.4)
+
+    # Высота строки и таблицы подстраиваются под количество Программ (до 11
+    # на Стадиях 6-7), чтобы плашка «Ваша экономия…» не наезжала на футер.
+    footer_top = H - Inches(0.75)
+    plaque_h = Inches(0.55)
+    gap_before_plaque = Inches(0.2)
+    max_table_h = footer_top - table_y - plaque_h - gap_before_plaque
+    row_h = min(Inches(0.4), max_table_h // n_rows)
+    row_h = max(row_h, Inches(0.26))
+    font_scale = min(1.0, row_h / Inches(0.4))
+
     gframe = slide.shapes.add_table(n_rows, 5, table_x, table_y, table_w, row_h * n_rows)
     tbl = gframe.table
     for i, w in enumerate(col_w):
@@ -746,32 +876,34 @@ def build_slide_loyalty_program(pres, data):
 
     headers = ["№", "Ключевой системный элемент", "Обычная цена", "Скидка", "Цена по Программе лояльности"]
     aligns = [PP_ALIGN.CENTER, PP_ALIGN.LEFT, PP_ALIGN.CENTER, PP_ALIGN.CENTER, PP_ALIGN.CENTER]
+    h_size, h_size4 = 11.5 * font_scale, 10.5 * font_scale
     for c, (h, a) in enumerate(zip(headers, aligns)):
-        _cell(tbl.cell(0, c), h, 11.5 if c != 4 else 10.5, WHITE, True, NAVY, a)
+        _cell(tbl.cell(0, c), h, h_size if c != 4 else h_size4, WHITE, True, NAVY, a)
 
+    body_size, final_size = 11 * font_scale, 12 * font_scale
     total_full, total_disc = 0, 0
     for i, item in enumerate(items):
         row = i + 1
         final_price = round(item["price"] * (1 - item["discount"] / 100))
         total_full += item["price"]; total_disc += final_price
         row_fill = WHITE if i % 2 == 0 else OFFWHITE
-        _cell(tbl.cell(row, 0), str(i + 1), 11, DARKTEXT, False, row_fill, PP_ALIGN.CENTER)
-        _cell(tbl.cell(row, 1), item["name"], 11, DARKTEXT, False, row_fill)
-        _cell(tbl.cell(row, 2), _fmt_rub(item["price"]), 11, TAUPE, False, row_fill, PP_ALIGN.CENTER,
+        _cell(tbl.cell(row, 0), str(i + 1), body_size, DARKTEXT, False, row_fill, PP_ALIGN.CENTER)
+        _cell(tbl.cell(row, 1), item["name"], body_size, DARKTEXT, False, row_fill)
+        _cell(tbl.cell(row, 2), _fmt_rub(item["price"]), body_size, TAUPE, False, row_fill, PP_ALIGN.CENTER,
               strike=item["discount"] > 0)
         disc_text = f'-{item["discount"]}%' if item["discount"] > 0 else "—"
         disc_bg = TERRACOTTA if item["discount"] > 0 else row_fill
         disc_color = WHITE if item["discount"] > 0 else DARKTEXT
-        _cell(tbl.cell(row, 3), disc_text, 11, disc_color, item["discount"] > 0, disc_bg, PP_ALIGN.CENTER)
+        _cell(tbl.cell(row, 3), disc_text, body_size, disc_color, item["discount"] > 0, disc_bg, PP_ALIGN.CENTER)
         final_color = GOLD if item["discount"] > 0 else DARKTEXT
-        _cell(tbl.cell(row, 4), _fmt_rub(final_price), 12, final_color, True, row_fill, PP_ALIGN.CENTER)
+        _cell(tbl.cell(row, 4), _fmt_rub(final_price), final_size, final_color, True, row_fill, PP_ALIGN.CENTER)
 
     savings = total_full - total_disc
-    plaque_y = table_y + row_h * n_rows + Inches(0.2)
-    add_rounded_rect(slide, table_x, plaque_y, table_w, Inches(0.55), fill_color=RGBColor(0xFF, 0xF5, 0xE6),
+    plaque_y = table_y + row_h * n_rows + gap_before_plaque
+    add_rounded_rect(slide, table_x, plaque_y, table_w, plaque_h, fill_color=RGBColor(0xFF, 0xF5, 0xE6),
                       line_color=GOLD, line_width_pt=1.5)
     add_textbox(slide, f"Ваша экономия при полном внедрении плана: {_fmt_rub(savings)}",
-                table_x + Inches(0.3), plaque_y, table_w - Inches(0.6), Inches(0.55),
+                table_x + Inches(0.3), plaque_y, table_w - Inches(0.6), plaque_h,
                 size=13, color=DARKTEXT, anchor=MSO_ANCHOR.MIDDLE)
     footer(slide, client, dark=False)
 
@@ -793,10 +925,19 @@ def build_slide_bundle_fork(pres, data):
                 left_h - Inches(1.3), size=13 if len(fork["intersection"]) <= 5 else 11, color=WHITE, line_spacing=1.3)
 
     right_x, right_w = Inches(5.6), Inches(5.0)
-    path_a_y, path_a_h = Inches(1.55), Inches(2.2)
-    path_b_y, path_b_h = path_a_y + path_a_h + Inches(0.25), Inches(2.6)
+    gap = Inches(0.25)
+    path_a_h, path_b_h = Inches(2.2), Inches(2.6)
 
-    origin_x, origin_y = left_x + left_w, path_a_y + path_a_h // 2
+    # Обе стрелки должны быть одинаковой длины и выходить из ОДНОЙ точки —
+    # вертикального центра левой плашки «Системные элементы к внедрению».
+    # Для этого центры плашек «Путь А» и «Путь Б» размещаются СИММЕТРИЧНО
+    # относительно этой точки (на равном вертикальном расстоянии d от неё) —
+    # тогда обе стрелки геометрически равны по длине без всяких допущений.
+    origin_x, origin_y = left_x + left_w, left_y + left_h // 2
+    d = gap // 2 + (path_a_h + path_b_h) // 4
+    path_a_y = origin_y - d - path_a_h // 2
+    path_b_y = origin_y + d - path_b_h // 2
+
     add_line_arrow(slide, origin_x, origin_y, right_x, path_a_y + path_a_h // 2, TAUPE, 4.5)
     add_line_arrow(slide, origin_x, origin_y, right_x, path_b_y + path_b_h // 2, TAUPE, 4.5)
 
@@ -805,14 +946,14 @@ def build_slide_bundle_fork(pres, data):
     add_textbox(slide, "ПУТЬ А — полные Программы по отдельности", right_x + Inches(0.25), path_a_y + Inches(0.14),
                 right_w - Inches(0.5), Inches(0.5), size=13, color=TERRACOTTA, bold=True)
     add_bullets(slide, fork["intersection"], right_x + Inches(0.25), path_a_y + Inches(0.62), right_w - Inches(0.5),
-                path_a_h - Inches(0.75), size=10 if len(fork["intersection"]) > 5 else 11.5, color=OFFWHITE, line_spacing=1.05)
+                path_a_h - Inches(0.75), size=11, color=OFFWHITE, line_spacing=1.05)
 
     add_rounded_rect(slide, right_x, path_b_y, right_w, path_b_h, fill_color=RGBColor(0x12, 0x29, 0x3A),
                       line_color=GOLD, line_width_pt=1.25)
     add_textbox(slide, "ПУТЬ Б — Комплексная программа «Возрождение малого бизнеса»", right_x + Inches(0.25),
                 path_b_y + Inches(0.15), right_w - Inches(0.5), Inches(0.65), size=13, color=GOLD, bold=True)
     add_bullets(slide, fork["bundlePrograms"], right_x + Inches(0.25), path_b_y + Inches(0.85), right_w - Inches(0.5),
-                path_b_h - Inches(1.0), size=9.5 if len(fork["bundlePrograms"]) > 6 else 11, color=OFFWHITE, line_spacing=1.05)
+                path_b_h - Inches(1.0), size=11, color=OFFWHITE, line_spacing=1.05)
 
     badge_x, badge_w = right_x + right_w + Inches(0.25), Inches(1.75)
     add_rounded_rect(slide, badge_x, path_a_y, badge_w, path_a_h, fill_color=RGBColor(0x1A, 0x1A, 0x1A),

@@ -56,15 +56,41 @@ def _build_growth_rules(flow_a):
     ]
 
 
-def _build_evidence_chain(flow_a, flow_b, area_deficit):
+def _build_evidence_chain(flow_a, client_challenge_scores, area_deficit, all_kse_ordered,
+                           top_n_related_kse=6, challenge_threshold=6):
+    """relatedKse — реальные КСЭ, к которым привела эта цепочка обоснования
+    (не демо-заглушка): «Критерии роста бизнеса» первой, если есть
+    несоответствия по Правилам роста, затем следующие по приоритету КСЭ из
+    остальных. Слайд №9 отрисовывает СТОЛЬКО плашек, сколько элементов в
+    списке (до top_n_related_kse).
+
+    challenges — ВСЕ 24 Вызова, которые клиент оценил >= challenge_threshold
+    (та же планка «острый», что использует _find_symptom_challenges в
+    report_text_generator.py для обоснования конкретных КСЭ в Скрипте) — НЕ
+    top-3 от top-5, как было раньше. В реальном сценарии таких вызовов может
+    быть заметно больше 3-5, слайд №9 должен вмещать их все."""
     growth_rule_mismatches = [m.split(" (")[0] for m in flow_a["mismatches"]
                                if m.split(" (")[0] != "Непреложные правила"]
-    challenges = flow_b["individual_top5"][:3]
+    challenges = sorted(
+        (c for c, s in client_challenge_scores.items() if s >= challenge_threshold),
+        key=lambda c: -client_challenge_scores[c],
+    )
     areas = [a for a, deficit in area_deficit.items() if deficit]
+
+    related_kse = []
+    if growth_rule_mismatches and "Критерии роста бизнеса" in all_kse_ordered:
+        related_kse.append("Критерии роста бизнеса")
+    for kse in all_kse_ordered:
+        if kse not in related_kse:
+            related_kse.append(kse)
+        if len(related_kse) >= top_n_related_kse:
+            break
+
     return {
         "growthRuleMismatches": growth_rule_mismatches,
         "challenges": challenges,
         "areas": areas,
+        "relatedKse": related_kse,
     }
 
 
@@ -175,7 +201,7 @@ def _tier_programs_for_slides(tier_programs):
     return out
 
 
-def export_pptx_data(diagnose_result, client_response, data, payload=None, top_n_slide13=5):
+def export_pptx_data(diagnose_result, client_response, data, payload=None, top_n_slide13=None):
     """Главная функция — вызывать с теми же аргументами, что и
     script_adapter.adapt(). Возвращает dict, готовый к json.dump()."""
     adapted = adapt_script_data(diagnose_result, client_response, data, payload)
@@ -198,10 +224,15 @@ def export_pptx_data(diagnose_result, client_response, data, payload=None, top_n
         },
         "section9": adapted["section9"],
         "growthRules": _build_growth_rules(flow_a),
-        "evidenceChain": _build_evidence_chain(flow_a, flow_b, adapted["area_deficit"]),
+        "evidenceChain": _build_evidence_chain(flow_a, adapted["client_challenge_scores"], adapted["area_deficit"], adapted["all_kse_ordered"]),
         "maturityTop5": _build_maturity_top5(flow_b, stage_id, primary_type, data),
         "allKseOrdered": adapted["all_kse_ordered"],
-        "topKseForSlide13": adapted["all_kse_ordered"][:top_n_slide13],
+        # ВЕСЬ список — слайд №13 должен 1-в-1 совпадать по количеству с
+        # Программами на слайдах №20-23 (обе стороны берутся из
+        # all_kse_ordered). top_n_slide13 больше не обрезает список —
+        # параметр оставлен для обратной совместимости, но по умолчанию
+        # не применяется, если явно не передан меньше len(all_kse_ordered).
+        "topKseForSlide13": adapted["all_kse_ordered"][:top_n_slide13] if top_n_slide13 else adapted["all_kse_ordered"],
         "tierPrograms": _tier_programs_for_slides(adapted["tier_programs"]),
         "loyaltyProgram": _build_loyalty_program(adapted["all_kse_ordered"], adapted["tier_programs"]),
         "bundleFork": _build_bundle_fork(diagnose_result, data, stage_id, adapted["all_kse_ordered"]),
