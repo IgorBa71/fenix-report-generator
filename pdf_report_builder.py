@@ -897,21 +897,35 @@ def build_story(client, result, data):
 
     SECTION3_TITLE = "Коэффициент Строитель-Протектор"
 
+    def _vyvody_with_fallback(new_result, old_text_block):
+        """Новые функции возвращают None, если клиент уже на целевом
+        значении — для этого случая используется старое (не переписанное
+        Игорем) положительное предложение из stage_level_report_texts.json."""
+        if new_result is not None:
+            return new_result
+        return rtg._first_two_sentences(old_text_block)[0]
+
     flow_a_sections = [
         ("Приоритетные сферы", 2,
          priority_spheres_table(cd["priority_spheres"], targets["priority_spheres"][s]),
-         rtg.render_priority_spheres_vyvody(cd["priority_spheres"], targets["priority_spheres"][s],
-                                             data["stage_level_report_texts"][s]["Приоритетные сферы"]["выводы_обе_ветки"]),
+         _vyvody_with_fallback(
+             rtg.render_priority_spheres_vyvody(cd["priority_spheres"], targets["priority_spheres"][s],
+                                                 s, data["priority_spheres_scenarios"]),
+             data["stage_level_report_texts"][s]["Приоритетные сферы"]["выводы_обе_ветки"]),
          "Приоритетные сферы", "ЦЕЛЕВОЕ ЗНАЧЕНИЕ ДЛЯ ЭТОЙ СТАДИИ"),
         ("Строитель-Протектор", 3,
          two_col_value_table([(cd["builder_protector_ratio"], targets["builder_protector_ratio"][s])]),
-         rtg.render_builder_protector_vyvody(cd["builder_protector_ratio"], targets["builder_protector_ratio"][s],
-                                              data["stage_level_report_texts"][s]["Строитель-Протектор"]["выводы_обе_ветки"]),
+         _vyvody_with_fallback(
+             rtg.render_builder_protector_vyvody(cd["builder_protector_ratio"], targets["builder_protector_ratio"][s],
+                                                  s, data["builder_protector_scenarios"]),
+             data["stage_level_report_texts"][s]["Строитель-Протектор"]["выводы_обе_ветки"]),
          SECTION3_TITLE, "ЦЕЛЕВОЕ ЗНАЧЕНИЕ ДЛЯ ЭТОЙ СТАДИИ"),
         ("Модальность", 4,
          modality_table(cd["modality"], targets["modality"][s]),
-         rtg.render_modality_vyvody(cd["modality"], targets["modality"][s],
-                                     data["stage_level_report_texts"][s]["Модальность"]["выводы_обе_ветки"]),
+         _vyvody_with_fallback(
+             rtg.render_modality_vyvody(cd["modality"], targets["modality"][s],
+                                         s, data["modality_scenarios"]),
+             data["stage_level_report_texts"][s]["Модальность"]["выводы_обе_ветки"]),
          "Модальность", "ЦЕЛЕВАЯ КОМБИНАЦИЯ ДЛЯ ЭТОЙ СТАДИИ"),
         ("Три роли лидера", 5,
          labeled_value_table([[role, f'{cd["three_leader_roles"][role]}%', f'{targets["three_leader_roles"][s][role]}%']
@@ -1429,6 +1443,14 @@ def main():
     data = sa.load_data()
     with open(BASE / "data" / "stage_level_report_texts.json", encoding="utf-8") as f:
         data["stage_level_report_texts"] = json.load(f)
+    with open(BASE / "data" / "consulting_programs.json", encoding="utf-8") as f:
+        data["consulting_programs"] = json.load(f)
+    with open(BASE / "data" / "priority_spheres_scenarios.json", encoding="utf-8") as f:
+        data["priority_spheres_scenarios"] = json.load(f)
+    with open(BASE / "data" / "builder_protector_scenarios.json", encoding="utf-8") as f:
+        data["builder_protector_scenarios"] = json.load(f)
+    with open(BASE / "data" / "modality_scenarios.json", encoding="utf-8") as f:
+        data["modality_scenarios"] = json.load(f)
 
     client = build_demo_client(data)
     result = sa.diagnose(client, data)

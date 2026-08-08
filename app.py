@@ -376,6 +376,16 @@ def generate_report():
             data["stage_level_report_texts"] = json.load(f)
         with open(BASE / "data" / "consulting_programs.json", encoding="utf-8") as f:
             data["consulting_programs"] = json.load(f)
+        # Новые (06-07.08.2026) сценарии отклонений от целевых значений —
+        # Приоритетные сферы / Коэффициент Строитель-Протектор / Модальность,
+        # переписанные Игорем на все возможные случаи (см. build_deviation_
+        # scenarios.py — там же комментарий про структуру).
+        with open(BASE / "data" / "priority_spheres_scenarios.json", encoding="utf-8") as f:
+            data["priority_spheres_scenarios"] = json.load(f)
+        with open(BASE / "data" / "builder_protector_scenarios.json", encoding="utf-8") as f:
+            data["builder_protector_scenarios"] = json.load(f)
+        with open(BASE / "data" / "modality_scenarios.json", encoding="utf-8") as f:
+            data["modality_scenarios"] = json.load(f)
 
         statements = _load_statements()
 

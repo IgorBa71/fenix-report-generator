@@ -696,17 +696,29 @@ def _first_two_sentences(text_block):
     return match_stmt, mismatch_stmt, detail
 
 
-def render_priority_spheres_vyvody(client_val, target_val, text_block):
-    match_stmt, mismatch_stmt, detail = _first_two_sentences(text_block)
+def render_priority_spheres_vyvody(client_val, target_val, stage_id, priority_spheres_scenarios):
+    """client_val/target_val: списки сфер по приоритету, напр.
+    ["Прибыль","Люди","Процессы"]. priority_spheres_scenarios: dict из
+    data/priority_spheres_scenarios.json — 5 сценариев отклонения на Стадию
+    (6-й, целевой, здесь не нужен — для него используется старый text_block,
+    см. вызов ниже)."""
     if client_val == target_val:
-        return match_stmt
-    return f"{mismatch_stmt} {detail}".strip()
+        return None  # вызывающая сторона подставит старый match_stmt
+    key = "|".join(client_val)
+    scenario = priority_spheres_scenarios[str(stage_id)].get(key)
+    if scenario:
+        return scenario
+    # защита: если вдруг перестановка не найдена (не должно случаться —
+    # все 5 неверных перестановок на каждую Стадию покрыты) — не падаем
+    return "Текущая расстановка приоритетов отличается от целевой для этой Стадии."
 
 
-def render_builder_protector_vyvody(client_val, target_val, text_block):
-    match_stmt, mismatch_stmt, detail = _first_two_sentences(text_block)
+def render_builder_protector_vyvody(client_val, target_val, stage_id, builder_protector_scenarios):
+    """client_val/target_val: строки-отношения вида '2:1'.
+    builder_protector_scenarios: dict из data/builder_protector_scenarios.json
+    — 2 сценария на Стадию ('below'/'above')."""
     if client_val == target_val:
-        return match_stmt
+        return None
 
     def _ratio_value(s):
         try:
@@ -716,46 +728,32 @@ def render_builder_protector_vyvody(client_val, target_val, text_block):
             return None
 
     cv, tv = _ratio_value(client_val), _ratio_value(target_val)
-    m_higher = re.search(r"ЕСЛИ ТЕКУЩЕЕ ЗНАЧЕНИЕ ВЫШЕ ЦЕЛЕВОГО:\s*(.*?)(?:ЕСЛИ ТЕКУЩЕЕ ЗНАЧЕНИЕ НИЖЕ|$)", detail, re.S)
-    m_lower = re.search(r"ЕСЛИ ТЕКУЩЕЕ ЗНАЧЕНИЕ НИЖЕ ЦЕЛЕВОГО:\s*(.*)$", detail, re.S)
-    if cv is not None and tv is not None and cv > tv and m_higher:
-        return f"{mismatch_stmt} {m_higher.group(1).strip()}"
-    if cv is not None and tv is not None and cv < tv and m_lower:
-        return f"{mismatch_stmt} {m_lower.group(1).strip()}"
-    # текст для этой ветки отсутствует в данных (см. пояснение в чате) — отдаём общее несоответствие
-    return mismatch_stmt
+    stage_scenarios = builder_protector_scenarios[str(stage_id)]
+    if cv is not None and tv is not None and cv < tv:
+        return stage_scenarios["below"]
+    if cv is not None and tv is not None and cv > tv:
+        return stage_scenarios["above"]
+    return "Текущее значение Коэффициента отличается от целевого для этой Стадии."
 
 
-def render_modality_vyvody(client_val, target_val, text_block):
-    match_stmt, mismatch_stmt, detail = _first_two_sentences(text_block)
+def render_modality_vyvody(client_val, target_val, stage_id, modality_scenarios):
+    """client_val/target_val: {уровень: роль}, напр.
+    {"Руководство":"Доминирующая", "Менеджеры":"Поддерживающая",
+    "Сотрудники":"Вспомогательная"}. modality_scenarios: dict из
+    data/modality_scenarios.json — 5 сценариев на Стадию, ключ —
+    'Уровень_на_Доминирующей|Уровень_на_Поддерживающей|Уровень_на_Вспомогательной'."""
     if client_val == target_val:
-        return match_stmt
-
-    # каждая запись: (регэксп-фраза метки, ключ роли в client_val/target_val)
-    marker_defs = [
-        (r"ЕСЛИ РУКОВОДСТВО НЕ В ТОЙ РОЛИ:", "Руководство"),
-        (r"ЕСЛИ МЕНЕДЖЕРЫ НЕ В ТОЙ РОЛИ:", "Менеджеры"),
-        (r"ЕСЛИ МЕНЕДЖЕРЫ В ДОМИНИРУЮЩЕЙ РОЛИ:", "Менеджеры"),
-        (r"ЕСЛИ СОТРУДНИКИ НЕ В ТОЙ РОЛИ:", "Сотрудники"),
-    ]
-    any_marker_pattern = "|".join(m[0] for m in marker_defs)
-    has_markers = bool(re.search(any_marker_pattern, detail))
-    if not has_markers:
-        # текст этой Стадии не размечен по ролям явно — это единый блок,
-        # относящийся к самому частому для неё несоответствию (см. пояснение в чате)
-        return f"{mismatch_stmt} {detail.strip()}" if detail.strip() else mismatch_stmt
-
-    parts = [mismatch_stmt]
-    for marker_phrase, role_key in marker_defs:
-        pattern = marker_phrase + r"\s*(.*?)(?:" + any_marker_pattern + r"|$)"
-        m = re.search(pattern, detail, re.S)
-        if m and client_val.get(role_key) != target_val.get(role_key):
-            fragment = m.group(1).strip()
-            if fragment and fragment not in parts:
-                parts.append(fragment)
-    if len(parts) == 1:
-        return mismatch_stmt
-    return " ".join(parts)
+        return None
+    role_to_level = {role: level for level, role in client_val.items()}
+    try:
+        key = "|".join([role_to_level["Доминирующая"], role_to_level["Поддерживающая"],
+                         role_to_level["Вспомогательная"]])
+    except KeyError:
+        return "Текущая комбинация ролей отличается от целевой для этой Стадии."
+    scenario = modality_scenarios[str(stage_id)].get(key)
+    if scenario:
+        return scenario
+    return "Текущая комбинация ролей отличается от целевой для этой Стадии."
 
 
 def render_leader_roles_vyvody(client_val, target_val, text_block):
