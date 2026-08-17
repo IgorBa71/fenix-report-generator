@@ -728,9 +728,20 @@ def build_slide_program_model_practice(pres, data):
 
 # Справочник ссылок на Калькуляторы окупаемости — НЕ клиент-специфичные
 # данные, общий для всех клиентов (как и в base.js) — поэтому не приходит
-# из pptx_data.json.
+# из pptx_data.json. Источник ссылок: файл «Ссылки на калькуляторы.xlsx».
 ROI_CALCULATORS = {
     "Сильная Управленческая команда": "https://fenix-lab.ru/smt-prices#ROIcalculator",
+    "Ключевые показатели эффективности": "https://fenix-lab.ru/kpi-program#ROIcalculator",
+    "Комплексное планирование": "https://fenix-lab.ru/kp#ROIcalculator",
+    "Ценности бренда и Базовые ценности": "https://fenix-lab.ru/values-program#ROIcalculator",
+    "Критерии роста бизнеса": "https://fenix-lab.ru/krb-program#ROIcalculator",
+    "Базовые бизнес-процессы": "https://fenix-lab.ru/bbp#ROIcalculator",
+    "Структура рабочих совещаний": "https://fenix-lab.ru/meetings-program#ROIcalculator",
+    "Структура Развития бизнеса": "https://fenix-lab.ru/srb-program#ROIcalculator",
+    "Коучинговое управление персоналом": "https://fenix-lab.ru/kup#ROIcalculator",
+    "Организационная структура": "https://fenix-lab.ru/org-structura#ROIcalculator",
+    "Бизнес-модель": "https://fenix-lab.ru/bm#ROIcalculator",
+    "Возрождение малого бизнеса": "https://fenix-lab.ru/vmb#ROIcalculator",
 }
 
 
