@@ -24,6 +24,7 @@ pdf_report_builder.py в HTTP API, чтобы Make.com мог их вызыва�
 """
 
 import base64
+import gzip
 import io
 import json
 import os
@@ -158,7 +159,24 @@ def serve_diagnostic_data(filename):
     path = DATA_DIR / real_name
     if not path.exists():
         return jsonify({"ok": False, "error": f"{real_name} not found on server"}), 404
-    return app.response_class(path.read_text(encoding="utf-8"), mimetype="application/json")
+
+    raw_text = path.read_text(encoding="utf-8")
+
+    # Принудительное gzip-сжатие ответа (а не просто отдача сырого текста).
+    # Обнаружено 18.08.2026: самый крупный из пяти файлов
+    # (challenge_symptoms_by_stage.json, ~155 КБ несжатым) стабильно не
+    # проходил у части российских пользователей — net::ERR_QUIC_PROTOCOL_ERROR,
+    # затем net::ERR_HTTP2_PING_FAILED, затем net::ERR_CONNECTION_RESET, при
+    # том что HTTP/3 уже отключён в Cloudflare, а HTTP/2 отключить нельзя
+    # (тариф). Остальные 4, более мелких файла грузились без проблем.
+    # Похоже на фильтрацию по объёму ответа за один запрос на уровне сети.
+    # Gzip сжимает этот файл до ~27 КБ — тестами подтверждено, что вопрос
+    # именно в размере, поэтому сжатие обходит проблему, не трогая протокол.
+    compressed = gzip.compress(raw_text.encode("utf-8"))
+    response = app.response_class(compressed, mimetype="application/json")
+    response.headers["Content-Encoding"] = "gzip"
+    response.headers["Content-Length"] = str(len(compressed))
+    return response
 
 
 @app.route("/generate-report", methods=["OPTIONS"])
