@@ -137,48 +137,46 @@ def add_cors_headers(response):
 # обхода похожей блокировки самого Render (см. 07_Инфраструктура_и_доступы)
 # и подтверждённо работает без VPN.
 #
-# Имена файлов слева — то, что запрашивает Опросник (DATA_BASE_URL + имя).
-# Имена справа — реальные файлы в data/, те же самые, на которых работает
-# scoring_algorithm.py — гарантирует идентичность данных 1-в-1 с бэкендом.
+# Имена файлов слева (для истории/справки) — то, что раньше запрашивал
+# Опросник по отдельности. Имена справа — реальные файлы в data/, те же
+# самые, на которых работает scoring_algorithm.py — гарантирует
+# идентичность данных 1-в-1 с бэкендом.
 #
-# challenge_symptoms.json (единый файл ~155 КБ несжатым, ~27 КБ после gzip)
-# по-прежнему стабильно не проходил у части российских пользователей даже
-# после сжатия — зависал на всех попытках вплоть до таймаута, хотя все
-# остальные, более мелкие файлы (включая immutable_rules.json на 47 КБ)
-# грузились без проблем. Похоже, дело не только в итоговом объёме ответа,
-# но и в длительности/непрерывности передачи именно этого файла — поэтому
-# 19.08.2026 файл разбит на 3 части поменьше по группам стадий роста
-# (challenge_symptoms_part1/2/3.json = стадии 1-3 / 4-5 / 6-7), которые
-# Опросник теперь грузит последовательно и объединяет на своей стороне.
-# Слияние трёх частей даёт байт-в-байт исходные данные — проверено скриптом.
+# 19.08.2026, попытка №1: challenge_symptoms.json (единый файл ~155 КБ
+# несжатым) разбили на 3 части поменьше (по группам стадий 1-3/4-5/6-7),
+# рассчитывая, что дело в объёме одного ответа. Результат неудачный:
+# итоговое время загрузки Опросника выросло до 60-90 секунд, т.к. почти
+# каждый из 7 последовательных запросов сначала "спотыкался" на ~10 сек
+# (наш собственный таймаут) и проходил только со второй попытки — похоже,
+# нестабильность именно в установке нового соединения до api.fenix-lab.ru
+# (DNS/TLS-хендшейк), а не в объёме передаваемых данных. При таком раскладе
+# больше запросов = кратно больше суммарного "штрафа" за нестабильность.
+#
+# 19.08.2026, попытка №2 (текущая): все 5 наборов данных объединены в один
+# ответ по одному маршруту /data/bundle.json — теперь Опросник делает ОДИН
+# запрос вместо 5-7, и "штраф" за нестабильное соединение оплачивается
+# максимум один раз (плюс retry на этот один запрос), а не многократно.
 # ---------------------------------------------------------------------------
 DATA_DIR = BASE / "data"
-_DIAGNOSTIC_DATA_FILES = {
-    "stages.json": "stages.json",
-    "immutable_rules.json": "immutable_rules.json",
-    "statements.json": "statements.json",
-    "challenge_symptoms_part1.json": "challenge_symptoms_by_stage_part1.json",
-    "challenge_symptoms_part2.json": "challenge_symptoms_by_stage_part2.json",
-    "challenge_symptoms_part3.json": "challenge_symptoms_by_stage_part3.json",
-    "rog_targets.json": "rules_of_growth_targets.json",
+_BUNDLE_FILES = {
+    "stages": "stages.json",
+    "immutable_rules": "immutable_rules.json",
+    "statements": "statements.json",
+    "challenge_symptoms": "challenge_symptoms_by_stage.json",
+    "rog_targets": "rules_of_growth_targets.json",
 }
 
 
-@app.route("/data/<path:filename>", methods=["GET"])
-def serve_diagnostic_data(filename):
-    real_name = _DIAGNOSTIC_DATA_FILES.get(filename)
-    if not real_name:
-        return jsonify({"ok": False, "error": "unknown data file"}), 404
-    path = DATA_DIR / real_name
-    if not path.exists():
-        return jsonify({"ok": False, "error": f"{real_name} not found on server"}), 404
+@app.route("/data/bundle.json", methods=["GET"])
+def serve_diagnostic_data_bundle():
+    bundle = {}
+    for key, real_name in _BUNDLE_FILES.items():
+        path = DATA_DIR / real_name
+        if not path.exists():
+            return jsonify({"ok": False, "error": f"{real_name} not found on server"}), 404
+        bundle[key] = json.loads(path.read_text(encoding="utf-8"))
 
-    raw_text = path.read_text(encoding="utf-8")
-
-    # Принудительное gzip-сжатие ответа для всех файлов данных диагностики
-    # (не только больших) — снижает объём передачи и, соответственно, время
-    # удержания соединения, что тоже может влиять на стабильность у
-    # пользователей с нестабильной сетью до api.fenix-lab.ru.
+    raw_text = json.dumps(bundle, ensure_ascii=False)
     compressed = gzip.compress(raw_text.encode("utf-8"))
     response = app.response_class(compressed, mimetype="application/json")
     response.headers["Content-Encoding"] = "gzip"
