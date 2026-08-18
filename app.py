@@ -121,9 +121,44 @@ def add_cors_headers(response):
     origin = request.headers.get("Origin")
     if origin in ALLOWED_ORIGINS:
         response.headers["Access-Control-Allow-Origin"] = origin
-        response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
         response.headers["Access-Control-Allow-Headers"] = "Content-Type"
     return response
+
+
+# ---------------------------------------------------------------------------
+# Данные диагностики (вопросы, правила, симптомы) — раньше отдавались с
+# igorba71.github.io/fenix-data/, но GitHub Pages оказался заблокирован без
+# VPN у части российских пользователей (обнаружено 18.08.2026,
+# net::ERR_CONNECTION_RESET на всех 5 файлах, воспроизводится и в домашней,
+# и в мобильной сети, снимается VPN). Перенесено на api.fenix-lab.ru — этот
+# домен уже проксируется через Cloudflare с отключённым TLS 1.3 именно ради
+# обхода похожей блокировки самого Render (см. 07_Инфраструктура_и_доступы)
+# и подтверждённо работает без VPN.
+#
+# Имена файлов слева — то, что запрашивает Опросник (DATA_BASE_URL + имя).
+# Имена справа — реальные файлы в data/, те же самые, на которых работает
+# scoring_algorithm.py — гарантирует идентичность данных 1-в-1 с бэкендом.
+# ---------------------------------------------------------------------------
+DATA_DIR = BASE / "data"
+_DIAGNOSTIC_DATA_FILES = {
+    "stages.json": "stages.json",
+    "immutable_rules.json": "immutable_rules.json",
+    "statements.json": "statements.json",
+    "challenge_symptoms.json": "challenge_symptoms_by_stage.json",
+    "rog_targets.json": "rules_of_growth_targets.json",
+}
+
+
+@app.route("/data/<path:filename>", methods=["GET"])
+def serve_diagnostic_data(filename):
+    real_name = _DIAGNOSTIC_DATA_FILES.get(filename)
+    if not real_name:
+        return jsonify({"ok": False, "error": "unknown data file"}), 404
+    path = DATA_DIR / real_name
+    if not path.exists():
+        return jsonify({"ok": False, "error": f"{real_name} not found on server"}), 404
+    return app.response_class(path.read_text(encoding="utf-8"), mimetype="application/json")
 
 
 @app.route("/generate-report", methods=["OPTIONS"])
