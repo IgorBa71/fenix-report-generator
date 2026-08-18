@@ -140,13 +140,26 @@ def add_cors_headers(response):
 # Имена файлов слева — то, что запрашивает Опросник (DATA_BASE_URL + имя).
 # Имена справа — реальные файлы в data/, те же самые, на которых работает
 # scoring_algorithm.py — гарантирует идентичность данных 1-в-1 с бэкендом.
+#
+# challenge_symptoms.json (единый файл ~155 КБ несжатым, ~27 КБ после gzip)
+# по-прежнему стабильно не проходил у части российских пользователей даже
+# после сжатия — зависал на всех попытках вплоть до таймаута, хотя все
+# остальные, более мелкие файлы (включая immutable_rules.json на 47 КБ)
+# грузились без проблем. Похоже, дело не только в итоговом объёме ответа,
+# но и в длительности/непрерывности передачи именно этого файла — поэтому
+# 19.08.2026 файл разбит на 3 части поменьше по группам стадий роста
+# (challenge_symptoms_part1/2/3.json = стадии 1-3 / 4-5 / 6-7), которые
+# Опросник теперь грузит последовательно и объединяет на своей стороне.
+# Слияние трёх частей даёт байт-в-байт исходные данные — проверено скриптом.
 # ---------------------------------------------------------------------------
 DATA_DIR = BASE / "data"
 _DIAGNOSTIC_DATA_FILES = {
     "stages.json": "stages.json",
     "immutable_rules.json": "immutable_rules.json",
     "statements.json": "statements.json",
-    "challenge_symptoms.json": "challenge_symptoms_by_stage.json",
+    "challenge_symptoms_part1.json": "challenge_symptoms_by_stage_part1.json",
+    "challenge_symptoms_part2.json": "challenge_symptoms_by_stage_part2.json",
+    "challenge_symptoms_part3.json": "challenge_symptoms_by_stage_part3.json",
     "rog_targets.json": "rules_of_growth_targets.json",
 }
 
@@ -162,16 +175,10 @@ def serve_diagnostic_data(filename):
 
     raw_text = path.read_text(encoding="utf-8")
 
-    # Принудительное gzip-сжатие ответа (а не просто отдача сырого текста).
-    # Обнаружено 18.08.2026: самый крупный из пяти файлов
-    # (challenge_symptoms_by_stage.json, ~155 КБ несжатым) стабильно не
-    # проходил у части российских пользователей — net::ERR_QUIC_PROTOCOL_ERROR,
-    # затем net::ERR_HTTP2_PING_FAILED, затем net::ERR_CONNECTION_RESET, при
-    # том что HTTP/3 уже отключён в Cloudflare, а HTTP/2 отключить нельзя
-    # (тариф). Остальные 4, более мелких файла грузились без проблем.
-    # Похоже на фильтрацию по объёму ответа за один запрос на уровне сети.
-    # Gzip сжимает этот файл до ~27 КБ — тестами подтверждено, что вопрос
-    # именно в размере, поэтому сжатие обходит проблему, не трогая протокол.
+    # Принудительное gzip-сжатие ответа для всех файлов данных диагностики
+    # (не только больших) — снижает объём передачи и, соответственно, время
+    # удержания соединения, что тоже может влиять на стабильность у
+    # пользователей с нестабильной сетью до api.fenix-lab.ru.
     compressed = gzip.compress(raw_text.encode("utf-8"))
     response = app.response_class(compressed, mimetype="application/json")
     response.headers["Content-Encoding"] = "gzip"
