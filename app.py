@@ -104,7 +104,9 @@ PRODAMUS_FORM_URL = "https://fenix-lab.payform.ru/"
 # приложения на хостинге (Timeweb) — иначе платежи и вебхук перестанут
 # работать (подпись будет пустой строкой).
 PRODAMUS_SECRET_KEY = os.environ.get("PRODAMUS_SECRET_KEY", "")
-ORDERS_FILE = Path("/app/data_storage/prodamus_orders.json")
+# ORDERS_FILE (путь к файлу заказов) больше не используется — 19.08.2026
+# заказы Prodamus перенесены в PostgreSQL, см. _load_orders/_save_orders
+# ниже по файлу.
 
 app = Flask(__name__)
 
@@ -606,26 +608,82 @@ def _load_statements():
 
 # ---------------------------------------------------------------------------
 # Хранилище заказов Prodamus.
-# 19.08.2026, миграция Render → Timeweb Cloud: путь /var/data (постоянный
-# диск, специфичный для Render) недоступен на Timeweb App Platform —
-# попытка записи туда даёт Permission denied (проверено в консоли
-# контейнера). Используем /app/data_storage — доступен для записи.
-# ВАЖНО: пока не подтверждено на практике, переживает ли этот путь полный
-# передеплой приложения (а не просто перезапуск процесса) — если после
-# следующего деплоя окажется, что данные стираются, нужно будет либо
-# подключить постоянный диск (Volume) в настройках Timeweb, либо перейти
-# на управляемую БД вместо файла.
+# 19.08.2026, миграция Render → Timeweb Cloud: сначала пробовали файл на
+# /var/data (Render — Permission denied на Timeweb), затем /app/data_storage
+# (доступен для записи, но подтверждено тестом — стирается при каждой
+# пересборке контейнера, т.к. это не постоянный диск). В App Platform
+# Timeweb нет опции подключения постоянного тома (Volume), поэтому переходим
+# на управляемую БД PostgreSQL — данные не привязаны к конкретному
+# контейнеру и переживают любые передеплои.
+#
+# Требуется переменная окружения DATABASE_URL вида:
+#   postgresql://USER:PASSWORD@HOST:PORT/DBNAME
+# (Timeweb обычно показывает готовую строку подключения в панели базы
+# данных — можно скопировать как есть; если панель даёт только отдельные
+# поля Host/Port/User/Password/DBName, собери строку по этому шаблону).
 # ---------------------------------------------------------------------------
+import psycopg2
+import psycopg2.extras
+
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+
+
+def _get_db_connection():
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL не задана в переменных окружения")
+    return psycopg2.connect(DATABASE_URL)
+
+
+def _init_orders_table():
+    """Создаёт таблицу заказов при первом запуске, если её ещё нет."""
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS orders (
+                    order_id TEXT PRIMARY KEY,
+                    data JSONB NOT NULL,
+                    updated_at TIMESTAMPTZ DEFAULT now()
+                )
+                """
+            )
+        conn.commit()
+
 
 def _load_orders():
-    if ORDERS_FILE.exists():
-        return json.loads(ORDERS_FILE.read_text(encoding="utf-8"))
-    return {}
+    with _get_db_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT order_id, data FROM orders")
+            rows = cur.fetchall()
+    return {row["order_id"]: row["data"] for row in rows}
 
 
 def _save_orders(orders):
-    ORDERS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    ORDERS_FILE.write_text(json.dumps(orders, ensure_ascii=False, indent=2), encoding="utf-8")
+    """Перезаписывает все заказы разом — сохраняем ту же сигнатуру функции,
+    что была у файловой версии, чтобы не трогать вызывающий код."""
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            for order_id, order_data in orders.items():
+                cur.execute(
+                    """
+                    INSERT INTO orders (order_id, data, updated_at)
+                    VALUES (%s, %s, now())
+                    ON CONFLICT (order_id)
+                    DO UPDATE SET data = EXCLUDED.data, updated_at = now()
+                    """,
+                    (order_id, json.dumps(order_data, ensure_ascii=False)),
+                )
+        conn.commit()
+
+
+# Таблица должна существовать до первого запроса — создаём при старте
+# приложения (если DATABASE_URL не задана, не падаем сразу, а только при
+# первой реальной попытке чтения/записи заказов — см. _get_db_connection).
+if DATABASE_URL:
+    try:
+        _init_orders_table()
+    except Exception as _e:
+        print(f"DEBUG: не удалось инициализировать таблицу orders при старте: {_e}", flush=True)
 
 
 def get_diagnostic_price(stage_id):
