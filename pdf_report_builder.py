@@ -17,7 +17,6 @@
 
 import json
 import re
-import fcntl
 from functools import partial
 from pathlib import Path
 
@@ -40,58 +39,49 @@ import report_text_generator as rtg
 BASE = Path(__file__).parent
 ASSETS = BASE / "assets"
 
-REPORT_COUNTER_FILE = Path("/var/data/report_counter.txt")
 REPORT_COUNTER_START = 355  # следующий номер после последнего уже выданного (354) до переноса на постоянный диск
 
 
 def get_next_report_number():
     """Возвращает следующий по порядку номер отчёта в формате 'ХХХХХХ' (6 цифр
-    с ведущими нулями) и сохраняет счётчик в файл на постоянном диске Render
-    (/var/data), подключённом к сервису fenix-report-generator, чтобы при
-    каждом новом деплое (обновлении кода) счётчик НЕ сбрасывался — обычная
-    файловая система сервиса на Render стирается при каждом передеплое,
-    а файлы под путём подключённого постоянного диска — нет.
+    с ведущими нулями).
 
-    Первый вызов (когда файла-счётчика ещё нет) возвращает REPORT_COUNTER_START.
-    Каждый следующий вызов — предыдущее значение + 1.
+    20.08.2026, миграция Render → Timeweb Cloud: раньше счётчик хранился в
+    файле на постоянном диске Render (/var/data) — на Timeweb App Platform
+    такого диска нет (см. подробный разбор в app.py про ORDERS_FILE), поэтому
+    счётчик перенесён в ту же базу PostgreSQL (fenix_orders / DATABASE_URL),
+    что уже используется для хранения заказов Prodamus.
 
-    ЗАЩИТА ОТ ГОНКИ УСЛОВИЙ (race condition): вся операция "прочитать →
-    увеличить → записать" выполняется под эксклюзивной файловой блокировкой
-    (fcntl.flock). Если два запроса на генерацию PDF приходят одновременно,
-    операционная система гарантирует, что второй процесс дождётся, пока
-    первый полностью завершит чтение и запись, и только потом получит
-    доступ к файлу — поэтому оба запроса гарантированно получат разные,
-    последовательные номера. Это работает надёжно как в пределах одного
-    процесса, так и между несколькими процессами (воркерами gunicorn),
-    поскольку блокировка накладывается на уровне ОС, а не в памяти Python.
+    Атомарность инкремента обеспечивается самой PostgreSQL: используется
+    последовательность (SEQUENCE) — при параллельных запросах СУБД
+    гарантированно выдаёт каждому вызову свой, уникальный, последовательный
+    номер, без явных блокировок в коде приложения (в отличие от файловой
+    версии, где для этого требовался fcntl.flock).
 
-    Данный способ достаточен, пока сервис работает как один инстанс на
-    Render (масштабирование "Scaling" недоступно для сервисов с постоянным
-    диском — это подтверждено в настройках сервиса). Если в будущем счётчик
-    переносится в отдельную БД/CRM с собственным атомарным инкрементом,
-    эту блокировку можно будет убрать."""
-    REPORT_COUNTER_FILE.parent.mkdir(parents=True, exist_ok=True)
-    # Открываем (или создаём) файл-счётчик в режиме чтения+записи, без усечения
-    lock_fd = open(REPORT_COUNTER_FILE, "a+")
-    try:
-        # Эксклюзивная блокировка: если файл уже заблокирован другим
-        # процессом/потоком, выполнение здесь остановится и подождёт
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        lock_fd.seek(0)
-        content = lock_fd.read().strip()
-        if content:
-            next_num = int(content) + 1
-        else:
-            next_num = REPORT_COUNTER_START
-        lock_fd.seek(0)
-        lock_fd.truncate()
-        lock_fd.write(str(next_num))
-        lock_fd.flush()
-    finally:
-        # Снимаем блокировку и закрываем файл в любом случае,
-        # даже если выше произошла ошибка
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        lock_fd.close()
+    Первый вызов возвращает REPORT_COUNTER_START. Каждый следующий — на 1
+    больше предыдущего.
+    """
+    import os
+    import psycopg
+
+    database_url = os.environ.get("DATABASE_URL", "")
+    if not database_url:
+        raise RuntimeError("DATABASE_URL не задана в переменных окружения")
+
+    with psycopg.connect(database_url) as conn:
+        with conn.cursor() as cur:
+            # Последовательность создаётся один раз при первом вызове, если
+            # её ещё нет — стартует с REPORT_COUNTER_START.
+            cur.execute(
+                """
+                CREATE SEQUENCE IF NOT EXISTS report_number_seq
+                START WITH %s
+                """,
+                (REPORT_COUNTER_START,),
+            )
+            cur.execute("SELECT nextval('report_number_seq')")
+            next_num = cur.fetchone()[0]
+        conn.commit()
     return f"{next_num:06d}"
 
 # ---------------------------------------------------------------------------
