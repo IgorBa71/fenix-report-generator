@@ -622,8 +622,8 @@ def _load_statements():
 # данных — можно скопировать как есть; если панель даёт только отдельные
 # поля Host/Port/User/Password/DBName, собери строку по этому шаблону).
 # ---------------------------------------------------------------------------
-import psycopg2
-import psycopg2.extras
+import psycopg
+import psycopg.rows
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
@@ -631,7 +631,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "")
 def _get_db_connection():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL не задана в переменных окружения")
-    return psycopg2.connect(DATABASE_URL)
+    return psycopg.connect(DATABASE_URL)
 
 
 def _init_orders_table():
@@ -652,7 +652,7 @@ def _init_orders_table():
 
 def _load_orders():
     with _get_db_connection() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute("SELECT order_id, data FROM orders")
             rows = cur.fetchall()
     return {row["order_id"]: row["data"] for row in rows}
