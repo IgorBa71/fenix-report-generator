@@ -4,4 +4,4 @@ gunicorn==22.0.0
 requests
 python-pptx==1.0.2
 fonttools
-psycopg[binary]==3.2.3
+psycopg[binary]
