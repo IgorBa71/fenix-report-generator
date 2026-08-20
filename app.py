@@ -776,7 +776,7 @@ def create_payment_link():
         }
         _save_orders(orders)
         print(f"DEBUG create-payment-link: заказ {order_id!r} сохранён. "
-              f"Всего ключей в orders.json теперь: {len(orders)}", flush=True)
+              f"Всего заказов в БД теперь: {len(orders)}", flush=True)
 
         return jsonify({"ok": True, "order_id": order_id, "payment_url": payment_url})
     except Exception as e:
@@ -912,14 +912,14 @@ def prodamus_webhook():
     # Но в уведомлении об оплате Продамус кладёт этот же наш идентификатор
     # обратно под ключом order_num, а под order_id — уже СВОЙ внутренний
     # номер заказа (не наш). Поэтому сопоставлять с нашей базой
-    # prodamus_orders.json нужно именно по order_num, а не по order_id.
+    # поиск заказа в БД нужен именно по order_num, а не по order_id.
     order_id = incoming.get("order_num", "")
     payment_status = incoming.get("payment_status", "")
 
     orders = _load_orders()
     print(f"DEBUG webhook: order_id из вебхука = {order_id!r}", flush=True)
-    print(f"DEBUG webhook: заказ найден в orders.json? {order_id in orders}", flush=True)
-    print(f"DEBUG webhook: все ключи сейчас в orders.json: {list(orders.keys())}", flush=True)
+    print(f"DEBUG webhook: заказ найден в БД? {order_id in orders}", flush=True)
+    print(f"DEBUG webhook: все order_id сейчас в БД: {list(orders.keys())}", flush=True)
     if order_id in orders:
         orders[order_id]["paid"] = (payment_status == "success")
         orders[order_id]["paid_at"] = datetime.now().isoformat()
@@ -1004,7 +1004,7 @@ def verify_payform_redirect():
                   f"paid={paid}", flush=True)
         else:
             print(f"DEBUG verify-payform-redirect: заказ {order_id!r} НЕ НАЙДЕН "
-                  f"в orders.json — подпись верна, но сопоставить с заказом "
+                  f"в базе заказов — подпись верна, но сопоставить с заказом "
                   f"не удалось", flush=True)
 
         return jsonify({"ok": True, "valid": True, "paid": paid})
