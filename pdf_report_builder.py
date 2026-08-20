@@ -72,12 +72,14 @@ def get_next_report_number():
         with conn.cursor() as cur:
             # Последовательность создаётся один раз при первом вызове, если
             # её ещё нет — стартует с REPORT_COUNTER_START.
+            # ВАЖНО: CREATE SEQUENCE — это DDL-команда, PostgreSQL не
+            # поддерживает для неё параметризованные значения (%s) в
+            # START WITH — значение нужно подставлять прямо в текст SQL.
+            # Это безопасно: REPORT_COUNTER_START — целочисленная константа
+            # из кода, а не пользовательский ввод, риска SQL-инъекции нет.
             cur.execute(
-                """
-                CREATE SEQUENCE IF NOT EXISTS report_number_seq
-                START WITH %s
-                """,
-                (REPORT_COUNTER_START,),
+                f"CREATE SEQUENCE IF NOT EXISTS report_number_seq "
+                f"START WITH {REPORT_COUNTER_START}"
             )
             cur.execute("SELECT nextval('report_number_seq')")
             next_num = cur.fetchone()[0]
