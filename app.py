@@ -639,9 +639,11 @@ def forward_to_make(client_response, pdf_base64, script_pdf_base64=None, present
             body=body,
             attachments=attachments,
         )
-        print(f"Уведомление отправлено на {IGOR_NOTIFICATION_EMAIL} (report_number={report_number})")
+        print(f"Уведомление отправлено на {IGOR_NOTIFICATION_EMAIL} (report_number={report_number})", flush=True)
     except Exception as e:
-        print(f"Не удалось отправить уведомление Игорю по SMTP: {e}")
+        import traceback
+        print(f"Не удалось отправить уведомление Игорю по SMTP: {e}", flush=True)
+        print(traceback.format_exc(), flush=True)
 
 
 def send_email_smtp(to_email, subject, body, attachments=None, from_email=None):
