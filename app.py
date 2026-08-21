@@ -575,6 +575,27 @@ def generate_report():
 
         forward_to_make(client_response, pdf_base64, script_pdf_base64, presentation_base64)
 
+        # 21.08.2026: сохраняем ТОЛЬКО PDF Отчёта (не Скрипт, не Презентацию —
+        # те для Игоря) и email клиента в заказ по order_id, если он пришёл
+        # от Опросника. Это нужно планировщику отложенной отправки клиенту
+        # через 23 часа после оплаты (send_delayed_report_to_clients) — он
+        # смотрит именно в эти поля заказа, а не пересобирает отчёт заново.
+        order_id = payload.get("order_id")
+        if order_id:
+            try:
+                orders = _load_orders()
+                if order_id in orders:
+                    orders[order_id]["report_pdf_base64"] = pdf_base64
+                    orders[order_id]["report_number"] = report_number
+                    orders[order_id]["client_email"] = q.get("email", "")
+                    orders[order_id]["client_name"] = q.get("name", "")
+                    _save_orders(orders)
+                else:
+                    print(f"DEBUG generate-report: order_id {order_id!r} передан, "
+                          f"но не найден в БД заказов — Сц2 не сможет отправить клиенту", flush=True)
+            except Exception as e:
+                print(f"DEBUG generate-report: не удалось сохранить PDF в заказ {order_id!r}: {e}", flush=True)
+
         return jsonify({
             "ok": True,
             "report_number": report_number,
@@ -1104,6 +1125,154 @@ def payment_status(order_id):
     if not order:
         return jsonify({"ok": False, "error": "order not found"}), 404
     return jsonify({"ok": True, "paid": order.get("paid", False)})
+
+
+# ---------------------------------------------------------------------------
+# 21.08.2026: замена Сценариев 2 и 3 Make.com ("Отложенная отправка клиенту
+# через 23ч" и "Ручная переотправка PDF клиенту"). Раньше оба брали готовый
+# PDF с Google Диска по File ID из Google Таблицы. Теперь PDF уже лежит в
+# PostgreSQL (поле report_pdf_base64 заказа, см. /generate-report выше) —
+# планировщик просто читает его оттуда и шлёт клиенту через тот же SMTP.
+#
+# КЛИЕНТУ УХОДИТ ТОЛЬКО ОТЧЁТ. Ни Скрипт консультации, ни Презентация сюда
+# физически не попадают — они даже не читаются в этой функции, их просто
+# нет в переменных ниже.
+# ---------------------------------------------------------------------------
+from datetime import timedelta
+
+DELAYED_SEND_HOURS = 23
+
+
+def send_delayed_report_to_clients():
+    """Раз в час (см. планировщик ниже) ищет в БД заказы, которые:
+    - оплачены (paid = true)
+    - отчёт уже сгенерирован (есть report_pdf_base64)
+    - с момента оплаты прошло >= DELAYED_SEND_HOURS часов
+    - клиенту ещё не отправлялось (нет client_sent_at)
+    и отправляет каждому такому клиенту письмо ТОЛЬКО с PDF Отчёта."""
+    try:
+        orders = _load_orders()
+    except Exception as e:
+        print(f"DEBUG Сц2: не удалось загрузить заказы: {e}", flush=True)
+        return
+
+    now = datetime.now()
+    sent_count = 0
+
+    for order_id, order in orders.items():
+        if not order.get("paid"):
+            continue
+        pdf_base64 = order.get("report_pdf_base64")
+        if not pdf_base64:
+            continue
+        if order.get("client_sent_at"):
+            continue  # уже отправлено раньше
+
+        paid_at_raw = order.get("paid_at")
+        if not paid_at_raw:
+            continue
+        try:
+            paid_at = datetime.fromisoformat(paid_at_raw)
+        except ValueError:
+            continue
+
+        if now - paid_at < timedelta(hours=DELAYED_SEND_HOURS):
+            continue  # ещё рано
+
+        client_email = order.get("client_email", "")
+        if not client_email:
+            print(f"DEBUG Сц2: у заказа {order_id!r} нет client_email — пропускаем", flush=True)
+            continue
+
+        report_number = order.get("report_number", "")
+        client_name = order.get("client_name", "")
+
+        try:
+            send_email_smtp(
+                to_email=client_email,
+                subject=f"Ваш отчёт «Полная оценка состояния бизнеса» №{report_number}",
+                body=(
+                    f"Здравствуйте{', ' + client_name if client_name else ''}!\n\n"
+                    f"Во вложении — ваш Отчёт по результатам диагностики бизнеса "
+                    f"(№{report_number}).\n\n"
+                    f"С уважением,\nЛаборатория бизнес лидерства «Феникс»"
+                ),
+                attachments=[("Otchet.pdf", pdf_base64)],
+            )
+            orders[order_id]["client_sent_at"] = now.isoformat()
+            _save_orders(orders)
+            sent_count += 1
+            print(f"DEBUG Сц2: Отчёт отправлен клиенту {client_email} (order_id={order_id!r})", flush=True)
+        except Exception as e:
+            import traceback
+            print(f"DEBUG Сц2: не удалось отправить Отчёт клиенту для заказа {order_id!r}: {e}", flush=True)
+            print(traceback.format_exc(), flush=True)
+
+    if sent_count:
+        print(f"DEBUG Сц2: всего отправлено писем клиентам за этот проход: {sent_count}", flush=True)
+
+
+@app.route("/resend-report/<order_id>", methods=["POST"])
+def resend_report(order_id):
+    """Замена Сценария 3 Make.com ("Ручная переотправка PDF клиенту").
+    Игорь вызывает этот эндпоинт вручную (например, curl или Postman) с
+    конкретным order_id, если клиент не получил письмо и просит прислать
+    повторно. Клиенту уходит ТОЛЬКО Отчёт, как и в основном отложенном
+    сценарии — Скрипт/Презентация здесь тоже не участвуют."""
+    orders = _load_orders()
+    order = orders.get(order_id)
+    if not order:
+        return jsonify({"ok": False, "error": "order not found"}), 404
+
+    pdf_base64 = order.get("report_pdf_base64")
+    if not pdf_base64:
+        return jsonify({"ok": False, "error": "report not generated for this order yet"}), 400
+
+    client_email = order.get("client_email", "")
+    if not client_email:
+        return jsonify({"ok": False, "error": "no client_email stored for this order"}), 400
+
+    report_number = order.get("report_number", "")
+    client_name = order.get("client_name", "")
+
+    try:
+        send_email_smtp(
+            to_email=client_email,
+            subject=f"Ваш отчёт «Полная оценка состояния бизнеса» №{report_number} (повторно)",
+            body=(
+                f"Здравствуйте{', ' + client_name if client_name else ''}!\n\n"
+                f"Направляем повторно ваш Отчёт по результатам диагностики бизнеса "
+                f"(№{report_number}).\n\n"
+                f"С уважением,\nЛаборатория бизнес лидерства «Феникс»"
+            ),
+            attachments=[("Otchet.pdf", pdf_base64)],
+        )
+        orders[order_id]["client_sent_at"] = datetime.now().isoformat()
+        _save_orders(orders)
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# Планировщик: проверяет заказы на отправку раз в час. Работает внутри того
+# же процесса gunicorn — отдельный сервер/крон не нужен. При нескольких
+# worker'ах (--workers 2, как сейчас на Timeweb) планировщик стартует в
+# КАЖДОМ из них, что может привести к повторной отправке одного и того же
+# письма — WERKZEUG_RUN_MAIN тут не поможет (это gunicorn, не werkzeug).
+# Проверка client_sent_at в БД перед отправкой снижает риск дублей (после
+# первой отправки одним worker'ом, второй увидит client_sent_at уже
+# заполненным), но полностью не исключает гонку, если оба worker'а
+# одновременно попадут в проход в одну и ту же секунду — с частотой раз в
+# час и текущим объёмом заказов это практически исключено.
+try:
+    from apscheduler.schedulers.background import BackgroundScheduler
+
+    _scheduler = BackgroundScheduler(timezone="UTC")
+    _scheduler.add_job(send_delayed_report_to_clients, "interval", hours=1, id="send_delayed_report")
+    _scheduler.start()
+    print("DEBUG: планировщик отложенной отправки клиентам запущен (раз в час)", flush=True)
+except Exception as e:
+    print(f"DEBUG: не удалось запустить планировщик отложенной отправки: {e}", flush=True)
 
 
 @app.route("/", methods=["GET"])
