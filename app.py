@@ -29,8 +29,12 @@ import io
 import json
 import os
 import re
+import smtplib
 import uuid
 from datetime import datetime
+from email.mime.application import MIMEApplication
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from pathlib import Path
 
 from flask import Flask, request, jsonify
@@ -83,11 +87,32 @@ from pptx_slides import (
     build_slide_closing, build_slide_mission,
 )
 
-# URL вебхука Сценария 1 в Make.com ("Мгновенное уведомление мне + PDF на
-# Диск") — после генерации PDF этот сервис сам отправляет туда готовый
-# результат (report_number, контакты клиента, PDF в base64), а дальше Make
-# кладёт файл на Google Диск, пишет строку в Google Таблицу и шлёт письмо.
-MAKE_SC1_WEBHOOK_URL = "https://hook.us2.make.com/7xgojg4ccxh1opdd5d1xn8t52666p2ik"
+# ---------------------------------------------------------------------------
+# 21.08.2026: отказ от Make.com для Сценария 1 ("Мгновенное уведомление мне +
+# PDF на Диск"). Раньше здесь был URL вебхука Make, который дальше вручную
+# раскладывал файлы по Google Диску, писал строку в Google Таблицу и слал
+# письмо Игорю через Gmail (fenix.checkup.report@gmail.com) — три
+# нероссийских сервиса на один шаг. Теперь письмо Игорю с тремя вложениями
+# (Отчёт, Скрипт консультации, Презентация) отправляется НАПРЯМУЮ из этого
+# приложения через SMTP Яндекс.Почты для домена (ящик report@fenix-lab.ru).
+# Google Sheets/Drive для Сценария 1 больше не используются вообще.
+#
+# Требуются переменные окружения на Timeweb:
+#   SMTP_HOST     — smtp.yandex.ru
+#   SMTP_PORT     — 465 (SSL)
+#   SMTP_LOGIN    — report@fenix-lab.ru
+#   SMTP_PASSWORD — пароль ПРИЛОЖЕНИЯ (не обычный пароль от ящика!),
+#                   создаётся в Яндекс 360 → Безопасность → Пароли приложений
+# ---------------------------------------------------------------------------
+SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.yandex.ru")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "465"))
+SMTP_LOGIN = os.environ.get("SMTP_LOGIN", "")
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
+
+# Куда падает мгновенное уведомление с тремя вложениями (раньше — Gmail
+# fenix.checkup.report@gmail.com, теперь можно указать любой ящик Игоря,
+# включая тот же report@fenix-lab.ru или личную почту).
+IGOR_NOTIFICATION_EMAIL = os.environ.get("IGOR_NOTIFICATION_EMAIL", "report@fenix-lab.ru")
 
 # ---------------------------------------------------------------------------
 # Интеграция оплаты Prodamus (HMAC-подписанные ссылки, без клиентского
@@ -565,40 +590,95 @@ def generate_report():
 
 def forward_to_make(client_response, pdf_base64, script_pdf_base64=None, presentation_base64=None):
     """
-    Отправляет готовый отчёт на вебхук Сценария 1 в Make.com — тот кладёт
-    PDF на Google Диск, пишет строку в Google Таблицу и шлёт письмо-
-    уведомление. Обёрнуто в try/except: если Make временно недоступен,
-    клиент на сайте всё равно должен увидеть экран "Заключение" (PDF уже
-    успешно создан) — потерю доставки лучше разбирать отдельно по логам
-    Render, чем ронять весь ответ пользователю.
+    21.08.2026: несмотря на старое имя (осталось для минимальных правок
+    вызывающего кода), функция больше НЕ обращается к Make.com. Вместо
+    этого она сразу отправляет письмо Игорю (IGOR_NOTIFICATION_EMAIL) с
+    тремя вложениями — Отчёт, Скрипт консультации, Презентация — напрямую
+    через SMTP Яндекс.Почты. Обёрнуто в try/except: если отправка письма
+    не удалась (например, нет сети до smtp.yandex.ru), клиент на сайте
+    всё равно должен увидеть экран "Заключение" (PDF уже успешно создан
+    и возвращается в ответе /generate-report) — потерю письма лучше
+    разбирать отдельно по логам приложения, чем ронять весь ответ.
 
     script_pdf_base64 / presentation_base64: Скрипт консультации и
-    Презентация — ОБА для Игоря, не для клиента.
-    ⚠️ ВАЖНО для настройки Make: оба поля добавлены в payload, но по
-    умолчанию Сценарий 1 их не использует (Make игнорирует незамапленные
-    поля webhook'а). Чтобы они реально доходили до Игоря, нужно ВРУЧНУЮ
-    добавить в Сценарий 1 (или в отдельный новый сценарий) шаги сохранения
-    на Google Диск / отправки на fenix.checkup.report@gmail.com — это НЕ то
-    же самое письмо/папка, что для клиентского Отчёта, и их НЕЛЬЗЯ
-    подключать к Сценариям 2/3 (отправка клиенту) ни в каком виде.
+    Презентация — ОБА только для Игоря, клиенту не отправляются.
     """
     q = client_response["qualification"]
-    payload = {
-        "report_number": q["report_number"],
-        "name": q.get("name", ""),
-        "company": q.get("company", ""),
-        "email": q.get("email", ""),
-        "phone": q.get("phone", ""),
-        "diagnosis_date": q["diagnosis_date"],
-        "pdf_base64": pdf_base64,
-        "script_pdf_base64": script_pdf_base64 or "",
-        "presentation_base64": presentation_base64 or "",
-    }
+    report_number = q.get("report_number", "")
+    name = q.get("name", "")
+    company = q.get("company", "")
+    email = q.get("email", "")
+    phone = q.get("phone", "")
+    diagnosis_date = q.get("diagnosis_date", "")
+
+    subject = f"Чек-ап №{report_number} — {name or company or email}"
+    body = (
+        f"Новая диагностика пройдена.\n\n"
+        f"Номер отчёта: {report_number}\n"
+        f"Имя: {name}\n"
+        f"Компания: {company}\n"
+        f"Email: {email}\n"
+        f"Телефон: {phone}\n"
+        f"Дата: {diagnosis_date}\n\n"
+        f"Во вложении: Отчёт"
+        + (", Скрипт консультации" if script_pdf_base64 else "")
+        + (", Презентация" if presentation_base64 else "")
+        + "."
+    )
+
+    attachments = [("Otchet.pdf", pdf_base64)]
+    if script_pdf_base64:
+        attachments.append(("Skript_konsultacii.pdf", script_pdf_base64))
+    if presentation_base64:
+        attachments.append(("Prezentaciya.pptx", presentation_base64))
+
     try:
-        resp = requests.post(MAKE_SC1_WEBHOOK_URL, json=payload, timeout=25)
-        print(f"Переслано в Make (Сц1): статус {resp.status_code}")
+        send_email_smtp(
+            to_email=IGOR_NOTIFICATION_EMAIL,
+            subject=subject,
+            body=body,
+            attachments=attachments,
+        )
+        print(f"Уведомление отправлено на {IGOR_NOTIFICATION_EMAIL} (report_number={report_number})")
     except Exception as e:
-        print(f"Не удалось переслать отчёт в Make (Сц1): {e}")
+        print(f"Не удалось отправить уведомление Игорю по SMTP: {e}")
+
+
+def send_email_smtp(to_email, subject, body, attachments=None, from_email=None):
+    """
+    Отправляет письмо через SMTP Яндекс.Почты (порт 465, SSL).
+
+    attachments: список кортежей (filename, base64_content). Тип вложения
+    (PDF/PPTX) определяется по расширению в filename — content-type ставим
+    универсальный application/octet-stream, чтобы не тащить лишнюю логику;
+    почтовые клиенты сами разбираются по расширению файла.
+
+    Бросает исключение при ошибке — вызывающий код сам решает, оборачивать
+    ли в try/except (для Игоря — да, чтобы не ронять ответ клиенту; для
+    отправки клиенту в будущем сценарии отложенной отправки — тоже да, с
+    ретраем на следующем проходе планировщика).
+    """
+    if not SMTP_LOGIN or not SMTP_PASSWORD:
+        raise RuntimeError("SMTP_LOGIN/SMTP_PASSWORD не заданы в переменных окружения")
+
+    from_email = from_email or SMTP_LOGIN
+
+    msg = MIMEMultipart()
+    msg["From"] = f"Лаборатория бизнес лидерства «Феникс» <{from_email}>"
+    msg["To"] = to_email
+    msg["Subject"] = subject
+    msg.attach(MIMEText(body, "plain", "utf-8"))
+
+    for filename, content_base64 in (attachments or []):
+        if not content_base64:
+            continue
+        part = MIMEApplication(base64.b64decode(content_base64))
+        part.add_header("Content-Disposition", "attachment", filename=filename)
+        msg.attach(part)
+
+    with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30) as server:
+        server.login(SMTP_LOGIN, SMTP_PASSWORD)
+        server.sendmail(from_email, [to_email], msg.as_string())
 
 
 def _load_statements():
