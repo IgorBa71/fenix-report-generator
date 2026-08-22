@@ -745,7 +745,9 @@ def send_email_smtp(to_email, subject, body, attachments=None, from_email=None):
     from_email = from_email or SMTP_LOGIN
 
     msg = MIMEMultipart()
-    msg["From"] = f"Лаборатория бизнес лидерства «Феникс» <{from_email}>"
+    from email.utils import formataddr
+    from email.header import Header
+    msg["From"] = formataddr((str(Header("Лаборатория бизнес лидерства «Феникс»", "utf-8")), from_email))
     msg["To"] = to_email
     msg["Subject"] = subject
     msg.attach(MIMEText(body, "plain", "utf-8"))
