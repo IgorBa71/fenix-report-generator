@@ -1435,10 +1435,10 @@ def admin_required(f):
 ADMIN_LOGIN_PAGE = """
 <!DOCTYPE html><html lang="ru"><head><meta charset="utf-8">
 <title>Вход — Феникс</title>
-<style>body{font-family:sans-serif;max-width:360px;margin:80px auto;padding:0 16px}
-input{width:100%;padding:8px;margin:6px 0;box-sizing:border-box}
-button{width:100%;padding:10px;background:#D5530B;color:#fff;border:none;border-radius:4px;cursor:pointer}
-.error{color:#c00}</style></head><body>
+<style>body{{font-family:sans-serif;max-width:360px;margin:80px auto;padding:0 16px}}
+input{{width:100%;padding:8px;margin:6px 0;box-sizing:border-box}}
+button{{width:100%;padding:10px;background:#D5530B;color:#fff;border:none;border-radius:4px;cursor:pointer}}
+.error{{color:#c00}}</style></head><body>
 <h2>Служебная панель «Феникс»</h2>
 {error_html}
 <form method="post">
