@@ -114,6 +114,17 @@ SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
 # включая тот же report@fenix-lab.ru или личную почту).
 IGOR_NOTIFICATION_EMAIL = os.environ.get("IGOR_NOTIFICATION_EMAIL", "report@fenix-lab.ru")
 
+# Логин/пароль для служебной панели /admin (План Б: ручной поиск заказа
+# клиента и переотправка файлов, если авто-цепочка Сц1/Сц2 не сработала
+# из-за сбоя на стороне Timeweb, например DDoS-атаки).
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
+
+# Проактивные уведомления Игорю в мессенджер MAX (бот "Феникс Алерты"),
+# на случай сбоев в отправке Отчётов (Сц1/Сц2) — см. send_max_alert() ниже.
+MAX_BOT_TOKEN = os.environ.get("MAX_BOT_TOKEN", "")
+MAX_ALERT_CHAT_ID = os.environ.get("MAX_ALERT_CHAT_ID", "")
+
 # ---------------------------------------------------------------------------
 # Интеграция оплаты Prodamus (HMAC-подписанные ссылки, без клиентского
 # JS-виджета "Единое окно" — тот не гарантирует корректное формирование
@@ -134,6 +145,14 @@ PRODAMUS_SECRET_KEY = os.environ.get("PRODAMUS_SECRET_KEY", "")
 # ниже по файлу.
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", "")
+if not app.secret_key:
+    # На случай, если переменную забыли задать — приложение не должно падать
+    # на старте, но логин в админку тогда будет ненадёжным (сессии не переживут
+    # рестарт контейнера). В переменных окружения Timeweb ОБЯЗАТЕЛЬНО задать
+    # FLASK_SECRET_KEY — любую длинную случайную строку.
+    print("ВНИМАНИЕ: FLASK_SECRET_KEY не задан в переменных окружения!", flush=True)
+    app.secret_key = "insecure-dev-key-change-me"
 
 BASE = Path(__file__).parent
 
@@ -586,6 +605,13 @@ def generate_report():
                 orders = _load_orders()
                 if order_id in orders:
                     orders[order_id]["report_pdf_base64"] = pdf_base64
+                    # Скрипт и Презентация сохраняются ОТДЕЛЬНЫМИ полями и
+                    # используются ТОЛЬКО в /admin (кнопка "прислать мне 3
+                    # файла"). Автоматический Сц2 (send_delayed_report_to_clients)
+                    # эти поля не читает вообще — клиенту они физически не
+                    # могут уйти по ошибке.
+                    orders[order_id]["script_pdf_base64"] = script_pdf_base64 or ""
+                    orders[order_id]["presentation_base64"] = presentation_base64 or ""
                     orders[order_id]["report_number"] = report_number
                     orders[order_id]["client_email"] = q.get("email", "")
                     orders[order_id]["client_name"] = q.get("name", "")
@@ -661,10 +687,42 @@ def forward_to_make(client_response, pdf_base64, script_pdf_base64=None, present
             attachments=attachments,
         )
         print(f"Уведомление отправлено на {IGOR_NOTIFICATION_EMAIL} (report_number={report_number})", flush=True)
+        send_max_alert(f"✅ Новый Чек-ап №{report_number} — уведомление с файлами отправлено на почту")
     except Exception as e:
         import traceback
         print(f"Не удалось отправить уведомление Игорю по SMTP: {e}", flush=True)
         print(traceback.format_exc(), flush=True)
+        send_max_alert(
+            f"⚠️ Не пришло уведомление о новом Чек-апе (Сц1)\n"
+            f"№{report_number}\n"
+            f"Причина: {e}\n"
+            f"Файлы сохранены в базе — можно достать через /admin"
+        )
+
+
+def send_max_alert(text):
+    """Отправляет короткое сервисное сообщение Игорю в MAX (бот "Феникс
+    Алерты"). Используется для проактивных уведомлений о сбоях в Сц1/Сц2
+    и о "зависших" заказах (см. check_stuck_orders ниже) — план Б на случай
+    недоступности Timeweb/почты в критичный момент.
+
+    Намеренно не бросает исключение при неудаче (это сам по себе резервный
+    канал уведомлений — если он недоступен, не должно ронять остальной код),
+    просто печатает в лог, что не получилось отправить."""
+    if not MAX_BOT_TOKEN or not MAX_ALERT_CHAT_ID:
+        print("DEBUG send_max_alert: MAX_BOT_TOKEN/MAX_ALERT_CHAT_ID не заданы — уведомление не отправлено", flush=True)
+        return
+    try:
+        resp = requests.post(
+            f"https://platform-api2.max.ru/messages?chat_id={MAX_ALERT_CHAT_ID}",
+            headers={"Authorization": MAX_BOT_TOKEN, "Content-Type": "application/json"},
+            json={"text": text},
+            timeout=15,
+        )
+        if resp.status_code >= 300:
+            print(f"DEBUG send_max_alert: MAX API вернул {resp.status_code}: {resp.text[:300]}", flush=True)
+    except Exception as e:
+        print(f"DEBUG send_max_alert: не удалось отправить уведомление в MAX: {e}", flush=True)
 
 
 def send_email_smtp(to_email, subject, body, attachments=None, from_email=None):
@@ -1142,6 +1200,12 @@ from datetime import timedelta
 
 DELAYED_SEND_HOURS = 23
 
+# Прямая ссылка на страницу записи на онлайн-встречу (та же Планёрка, что
+# встроена виджетом на экране "Заключение" опросника) — используется в
+# письмах клиенту (Сц2/Сц3), чтобы напомнить о встрече или дать возможность
+# записаться повторно, если клиент забыл или передумал.
+PLANERKA_BOOKING_URL = "https://planerka.app/meet/igor-balandin-sfkybs/polnaya-ocenka-sostoyaniya-biznesa"
+
 
 def send_delayed_report_to_clients():
     """Раз в час (см. планировщик ниже) ищет в БД заказы, которые:
@@ -1193,8 +1257,16 @@ def send_delayed_report_to_clients():
                 subject=f"Ваш отчёт «Полная оценка состояния бизнеса» №{report_number}",
                 body=(
                     f"Здравствуйте{', ' + client_name if client_name else ''}!\n\n"
-                    f"Во вложении — ваш Отчёт по результатам диагностики бизнеса "
-                    f"(№{report_number}).\n\n"
+                    f"Спасибо, что прошли диагностику бизнеса — во вложении ваш "
+                    f"персональный Отчёт (№{report_number}) по нашей авторской "
+                    f"аналитической модели «Возрождение бизнеса».\n\n"
+                    f"Если вы уже записались на онлайн-встречу с нашим бизнес-"
+                    f"консультантом — мы ждём вас в назначенное время, там подробно "
+                    f"разберём результаты и наметим шаги для внедрения недостающих "
+                    f"Ключевых системных элементов в вашем бизнесе.\n\n"
+                    f"Если вы ещё не выбрали дату и время (или хотите перенести "
+                    f"встречу) — сделать это можно здесь:\n"
+                    f"{PLANERKA_BOOKING_URL}\n\n"
                     f"С уважением,\nЛаборатория бизнес лидерства «Феникс»"
                 ),
                 attachments=[("Otchet.pdf", pdf_base64)],
@@ -1203,13 +1275,63 @@ def send_delayed_report_to_clients():
             _save_orders(orders)
             sent_count += 1
             print(f"DEBUG Сц2: Отчёт отправлен клиенту {client_email} (order_id={order_id!r})", flush=True)
+            send_max_alert(f"✅ Отчёт отправлен клиенту {client_email} (№{report_number})")
         except Exception as e:
             import traceback
             print(f"DEBUG Сц2: не удалось отправить Отчёт клиенту для заказа {order_id!r}: {e}", flush=True)
             print(traceback.format_exc(), flush=True)
+            send_max_alert(
+                f"⚠️ Клиент не получил Отчёт (Сц2)\n"
+                f"№{report_number}, {client_email}\n"
+                f"Причина: {e}\n"
+                f"Нужно отправить вручную через /admin"
+            )
 
     if sent_count:
         print(f"DEBUG Сц2: всего отправлено писем клиентам за этот проход: {sent_count}", flush=True)
+
+
+STUCK_ORDER_HOURS = 25  # на 2 часа больше нормы (23ч) — запас, чтобы не дублировать обычную задержку
+
+
+def check_stuck_orders():
+    """Отдельная проверка (тот же часовой планировщик): заказы, где отчёт
+    готов, но клиенту не отправлено спустя STUCK_ORDER_HOURS часов — сигнал
+    даже если явных ошибок в логах не было (например, само приложение было
+    недоступно в момент, когда должен был сработать send_delayed_report_to_clients,
+    и просто пропустило проход)."""
+    try:
+        orders = _load_orders()
+    except Exception as e:
+        print(f"DEBUG check_stuck_orders: не удалось загрузить заказы: {e}", flush=True)
+        return
+
+    now = datetime.now()
+    for order_id, order in orders.items():
+        if not order.get("paid") or not order.get("report_pdf_base64") or order.get("client_sent_at"):
+            continue
+        # уже предупреждали про этот заказ раньше — не дублируем на каждый проход
+        if order.get("stuck_alert_sent"):
+            continue
+        paid_at_raw = order.get("paid_at")
+        if not paid_at_raw:
+            continue
+        try:
+            paid_at = datetime.fromisoformat(paid_at_raw)
+        except ValueError:
+            continue
+        if now - paid_at < timedelta(hours=STUCK_ORDER_HOURS):
+            continue
+
+        client_email = order.get("client_email", "")
+        report_number = order.get("report_number", "")
+        send_max_alert(
+            f"🔴 Клиент {client_email} не получил Отчёт больше {STUCK_ORDER_HOURS} часов — нужна проверка\n"
+            f"№{report_number}, order_id: {order_id}\n"
+            f"Проверь вручную через /admin"
+        )
+        orders[order_id]["stuck_alert_sent"] = now.isoformat()
+        _save_orders(orders)
 
 
 @app.route("/resend-report/<order_id>", methods=["POST"])
@@ -1241,8 +1363,13 @@ def resend_report(order_id):
             subject=f"Ваш отчёт «Полная оценка состояния бизнеса» №{report_number} (повторно)",
             body=(
                 f"Здравствуйте{', ' + client_name if client_name else ''}!\n\n"
-                f"Направляем повторно ваш Отчёт по результатам диагностики бизнеса "
-                f"(№{report_number}).\n\n"
+                f"Направляем повторно ваш персональный Отчёт (№{report_number}) "
+                f"по результатам диагностики бизнеса.\n\n"
+                f"Если вы уже записались на онлайн-встречу с нашим бизнес-"
+                f"консультантом — мы ждём вас в назначенное время. Если ещё "
+                f"не выбрали дату и время (или хотите перенести встречу) — "
+                f"сделать это можно здесь:\n"
+                f"{PLANERKA_BOOKING_URL}\n\n"
                 f"С уважением,\nЛаборатория бизнес лидерства «Феникс»"
             ),
             attachments=[("Otchet.pdf", pdf_base64)],
@@ -1269,6 +1396,7 @@ try:
 
     _scheduler = BackgroundScheduler(timezone="UTC")
     _scheduler.add_job(send_delayed_report_to_clients, "interval", hours=1, id="send_delayed_report")
+    _scheduler.add_job(check_stuck_orders, "interval", hours=1, id="check_stuck_orders")
     _scheduler.start()
     print("DEBUG: планировщик отложенной отправки клиентам запущен (раз в час)", flush=True)
 except Exception as e:
@@ -1278,6 +1406,206 @@ except Exception as e:
 @app.route("/", methods=["GET"])
 def health():
     return jsonify({"status": "ok", "service": "fenix-report-generator"})
+
+
+# ---------------------------------------------------------------------------
+# 21.08.2026: служебная панель "План Б". Нужна на случай, если Timeweb
+# временно недоступен (например, во время DDoS-атаки на инфраструктуру, как
+# было 21.08.2026) в момент, когда должен был сработать Сц1 (уведомление
+# Игорю) или Сц2 (отложенная отправка клиенту). Данные заказа и PDF-файлы к
+# этому моменту уже сохранены в PostgreSQL (см. /generate-report) — эта
+# страница просто даёт Игорю ручной доступ к ним по email клиента, без
+# необходимости просить помощь с SQL-запросами.
+# ---------------------------------------------------------------------------
+from functools import wraps
+from flask import session, redirect, url_for, request as flask_request
+
+
+def admin_required(f):
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        if not session.get("admin_logged_in"):
+            return redirect(url_for("admin_login"))
+        return f(*args, **kwargs)
+    return wrapper
+
+
+ADMIN_LOGIN_PAGE = """
+<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8">
+<title>Вход — Феникс</title>
+<style>body{font-family:sans-serif;max-width:360px;margin:80px auto;padding:0 16px}
+input{width:100%;padding:8px;margin:6px 0;box-sizing:border-box}
+button{width:100%;padding:10px;background:#D5530B;color:#fff;border:none;border-radius:4px;cursor:pointer}
+.error{color:#c00}</style></head><body>
+<h2>Служебная панель «Феникс»</h2>
+{error_html}
+<form method="post">
+<input type="text" name="username" placeholder="Логин" required autofocus>
+<input type="password" name="password" placeholder="Пароль" required>
+<button type="submit">Войти</button>
+</form></body></html>
+"""
+
+
+@app.route("/admin/login", methods=["GET", "POST"])
+def admin_login():
+    error_html = ""
+    if flask_request.method == "POST":
+        username = flask_request.form.get("username", "")
+        password = flask_request.form.get("password", "")
+        if ADMIN_USERNAME and ADMIN_PASSWORD and username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+            session["admin_logged_in"] = True
+            return redirect(url_for("admin_dashboard"))
+        error_html = '<p class="error">Неверный логин или пароль</p>'
+    return ADMIN_LOGIN_PAGE.format(error_html=error_html)
+
+
+@app.route("/admin/logout", methods=["POST"])
+def admin_logout():
+    session.pop("admin_logged_in", None)
+    return redirect(url_for("admin_login"))
+
+
+ADMIN_DASHBOARD_PAGE = """
+<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8">
+<title>Панель — Феникс</title>
+<style>body{{font-family:sans-serif;max-width:640px;margin:40px auto;padding:0 16px}}
+input{{padding:8px;width:70%}}
+button{{padding:8px 14px;background:#D5530B;color:#fff;border:none;border-radius:4px;cursor:pointer}}
+table{{width:100%;border-collapse:collapse;margin-top:20px}}
+td,th{{border:1px solid #ccc;padding:8px;text-align:left}}
+.msg{{color:green}} .err{{color:#c00}}
+form.inline{{display:inline}}</style></head><body>
+<h2>Поиск заказа клиента</h2>
+<form method="get">
+<input type="text" name="email" placeholder="email клиента" value="{email_value}">
+<button type="submit">Найти</button>
+</form>
+{message_html}
+{results_html}
+<form method="post" action="/admin/logout" style="margin-top:30px">
+<button type="submit" style="background:#666">Выйти</button>
+</form>
+</body></html>
+"""
+
+
+@app.route("/admin", methods=["GET"])
+@admin_required
+def admin_dashboard():
+    email = flask_request.args.get("email", "").strip().lower()
+    message_html = ""
+    results_html = ""
+
+    if flask_request.args.get("msg"):
+        results_html_msg = flask_request.args.get("msg")
+        is_err = flask_request.args.get("err") == "1"
+        message_html = f'<p class="{"err" if is_err else "msg"}">{results_html_msg}</p>'
+
+    if email:
+        orders = _load_orders()
+        matches = [
+            (oid, o) for oid, o in orders.items()
+            if o.get("client_email", "").strip().lower() == email
+        ]
+        if not matches:
+            results_html = f"<p>Заказы с email <b>{email}</b> не найдены.</p>"
+        else:
+            rows = ""
+            for order_id, o in matches:
+                report_ready = "Да" if o.get("report_pdf_base64") else "Нет"
+                sent_to_client = o.get("client_sent_at", "") or "не отправлялось"
+                rows += f"""
+                <tr>
+                    <td>{order_id}</td>
+                    <td>№{o.get('report_number', '—')}</td>
+                    <td>{'Оплачен' if o.get('paid') else 'Не оплачен'}</td>
+                    <td>Отчёт готов: {report_ready}</td>
+                    <td>Клиенту: {sent_to_client}</td>
+                    <td>
+                        <form class="inline" method="post" action="/admin/send-client/{order_id}">
+                            <button type="submit">Отправить Отчёт клиенту</button>
+                        </form>
+                        <form class="inline" method="post" action="/admin/send-me/{order_id}">
+                            <button type="submit">Прислать мне 3 файла</button>
+                        </form>
+                    </td>
+                </tr>"""
+            results_html = f"<table><tr><th>order_id</th><th>№</th><th>Оплата</th><th>Отчёт</th><th>Отправка клиенту</th><th>Действия</th></tr>{rows}</table>"
+
+    return ADMIN_DASHBOARD_PAGE.format(email_value=email, message_html=message_html, results_html=results_html)
+
+
+@app.route("/admin/send-client/<order_id>", methods=["POST"])
+@admin_required
+def admin_send_client(order_id):
+    """Кнопка «Отправить Отчёт клиенту» — уходит ТОЛЬКО PDF Отчёта, тот же
+    текст письма, что и в автоматическом Сц2."""
+    orders = _load_orders()
+    order = orders.get(order_id)
+    if not order or not order.get("report_pdf_base64"):
+        return redirect(url_for("admin_dashboard", email=order.get("client_email", "") if order else "",
+                                 msg="Отчёт для этого заказа ещё не готов", err="1"))
+
+    client_email = order.get("client_email", "")
+    report_number = order.get("report_number", "")
+    client_name = order.get("client_name", "")
+    try:
+        send_email_smtp(
+            to_email=client_email,
+            subject=f"Ваш отчёт «Полная оценка состояния бизнеса» №{report_number}",
+            body=(
+                f"Здравствуйте{', ' + client_name if client_name else ''}!\n\n"
+                f"Направляем ваш персональный Отчёт (№{report_number}) по результатам "
+                f"диагностики бизнеса.\n\n"
+                f"Если вы уже записались на онлайн-встречу с нашим бизнес-консультантом "
+                f"— мы ждём вас в назначенное время. Если ещё не выбрали дату и время "
+                f"(или хотите перенести встречу) — сделать это можно здесь:\n"
+                f"{PLANERKA_BOOKING_URL}\n\n"
+                f"С уважением,\nЛаборатория бизнес лидерства «Феникс»"
+            ),
+            attachments=[("Otchet.pdf", order["report_pdf_base64"])],
+        )
+        orders[order_id]["client_sent_at"] = datetime.now().isoformat()
+        _save_orders(orders)
+        return redirect(url_for("admin_dashboard", email=client_email, msg="Отчёт отправлен клиенту"))
+    except Exception as e:
+        return redirect(url_for("admin_dashboard", email=client_email, msg=f"Ошибка отправки: {e}", err="1"))
+
+
+@app.route("/admin/send-me/<order_id>", methods=["POST"])
+@admin_required
+def admin_send_me(order_id):
+    """Кнопка «Прислать мне 3 файла» — Отчёт + Скрипт консультации +
+    Презентация уходят на IGOR_NOTIFICATION_EMAIL, для подготовки к
+    консультации, если исходное письмо Сц1 не дошло."""
+    orders = _load_orders()
+    order = orders.get(order_id)
+    client_email = order.get("client_email", "") if order else ""
+    if not order or not order.get("report_pdf_base64"):
+        return redirect(url_for("admin_dashboard", email=client_email, msg="Файлы для этого заказа ещё не готовы", err="1"))
+
+    report_number = order.get("report_number", "")
+    attachments = [("Otchet.pdf", order["report_pdf_base64"])]
+    if order.get("script_pdf_base64"):
+        attachments.append(("Skript_konsultacii.pdf", order["script_pdf_base64"]))
+    if order.get("presentation_base64"):
+        attachments.append(("Prezentaciya.pptx", order["presentation_base64"]))
+
+    try:
+        send_email_smtp(
+            to_email=IGOR_NOTIFICATION_EMAIL,
+            subject=f"[Ручная отправка] Чек-ап №{report_number} — {order.get('client_name', '') or client_email}",
+            body=(
+                f"Файлы по заказу {order_id} (email клиента: {client_email}), "
+                f"отправлены вручную через /admin.\n\nВо вложении: "
+                + ", ".join(name for name, _ in attachments) + "."
+            ),
+            attachments=attachments,
+        )
+        return redirect(url_for("admin_dashboard", email=client_email, msg="Файлы отправлены вам на почту"))
+    except Exception as e:
+        return redirect(url_for("admin_dashboard", email=client_email, msg=f"Ошибка отправки: {e}", err="1"))
 
 
 if __name__ == "__main__":
