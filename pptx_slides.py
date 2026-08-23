@@ -771,6 +771,28 @@ def _build_program_cards_slide(pres, data, tier_name, slide_title):
         card_y, card_h = Inches(1.9), Inches(4.9)
         for i, p in enumerate(chunk):
             x = Inches(0.7) + i * (card_w + Inches(0.4))
+
+            # 22.08.2026: строка "Калькулятор окупаемости инвестиций: URL"
+            # раньше стояла ВНУТРИ карточки (над разделительной линией) и на
+            # части Программ визуально наезжала на 3-й буллет блока "Что Вы
+            # получаете" или на саму разделительную линию (длинные названия
+            # Программ/буллеты не оставляли ей запаса по высоте). Убрана из
+            # карточки полностью и вынесена НАД карточкой, в свободные ~0.5"
+            # между заголовком слайда и верхним краем карточки — с этим
+            # решён и визуальный overflow, и сама ссылка стала кликабельной
+            # (без видимого URL в тексте — только слова "Калькулятор
+            # окупаемости инвестиций", per требование Игоря 22.08.2026:
+            # Презентация не выдаётся клиенту файлом, ссылка открывается
+            # Игорем прямо во время трансляции по просьбе клиента).
+            calc_url = ROI_CALCULATORS.get(p["name"])
+            if calc_url:
+                calc_box = add_textbox(slide, "🔗 Калькулятор окупаемости инвестиций",
+                                        x + Inches(0.05), card_y - Inches(0.34), card_w - Inches(0.1), Inches(0.3),
+                                        size=11, color=TEAL, bold=False)
+                calc_run = calc_box.text_frame.paragraphs[0].runs[0]
+                calc_run.hyperlink.address = calc_url
+                calc_run.font.underline = True
+
             add_rounded_rect(slide, x, card_y, card_w, card_h, fill_color=RGBColor(0xDE, 0xEB, 0xF7),
                               line_color=RGBColor(0xE4, 0xE1, 0xDC), line_width_pt=1)
             stripe = slide.shapes.add_shape(1, x, card_y, card_w, Inches(0.1))
@@ -780,18 +802,11 @@ def _build_program_cards_slide(pres, data, tier_name, slide_title):
                         size=16, color=NAVY, bold=True)
             add_textbox(slide, "ЧТО ВЫ ПОЛУЧАЕТЕ:", x + Inches(0.3), card_y + Inches(1.3), card_w - Inches(0.6), Inches(0.3),
                         size=10, color="9A9088", bold=True)
-            calc_url = ROI_CALCULATORS.get(p["name"])
-            # Если для Программы есть Калькулятор окупаемости — освобождаем
-            # немного места, сузив блок буллетов, и ставим строку с
-            # калькулятором прямо НАД разделительной линией (было: ниже цены,
-            # что вылезало за пределы карточки и наезжало на футер).
-            bullets_h = Inches(1.85) if calc_url else Inches(2.2)
-            add_bullets(slide, p["outcomes"], x + Inches(0.3), card_y + Inches(1.65), card_w - Inches(0.6), bullets_h,
+            # Строка калькулятора больше не занимает место ВНУТРИ карточки —
+            # блок буллетов теперь всегда получает полную высоту 2.2",
+            # независимо от того, есть ли у Программы калькулятор.
+            add_bullets(slide, p["outcomes"], x + Inches(0.3), card_y + Inches(1.65), card_w - Inches(0.6), Inches(2.2),
                         size=11.5, color=DARKTEXT)
-            if calc_url:
-                add_textbox(slide, f'Калькулятор окупаемости инвестиций: {calc_url}',
-                            x + Inches(0.3), card_y + Inches(3.58), card_w - Inches(0.6), Inches(0.34),
-                            size=9.5, color=TEAL)
 
             ln = slide.shapes.add_connector(1, x + Inches(0.3), card_y + Inches(3.95), x + card_w - Inches(0.3), card_y + Inches(3.95))
             ln.line.color.rgb = RGBColor(0xD8, 0xD3, 0xCC); ln.line.width = Pt(1)

@@ -104,10 +104,120 @@ SLIDE_REGISTRY = {
 }
 
 
+# ---------------------------------------------------------------------------
+# 22.08.2026: SLIDE_REGISTRY выше — это НОМИНАЛЬНЫЫЙ (усреднённый) вариант
+# нумерации, актуальный только когда во всех трёх ярусах (Фундамент/Ядро/
+# Надстройка) ровно по 1 странице карточек программ, И развилка "Возрождение
+# малого бизнеса" показывается. В реальности количество слайдов на ярус
+# зависит от числа Программ в нём — в pptx_slides.py._build_program_cards_slide
+# карточки разбиваются по MAX_CARDS_PER_SLIDE=3 на слайд, поэтому ярус с 4-6
+# программами занимает 2 слайда, а не 1. Из-за этого номинальные номера могли
+# расходиться с реальными номерами в .pptx.
+#
+# Чтобы нумерация в Скрипте на 100% совпадала с реально сгенерированной
+# Презентацией — используем ДИНАМИЧЕСКИЙ расчёт (compute_dynamic_slide_numbers)
+# по тем же входным данным (tier_programs, bundle_fork), что видит и сама
+# Презентация, с той же арифметикой разбивки. slide_marker() ниже сначала
+# смотрит в thread-local карту (если она установлена для текущего запроса),
+# и только если её нет — откатывается на статичный SLIDE_REGISTRY (нужно для
+# обратной совместимости демо-кода внизу файла, который печатает пример без
+# полного build_script_sections()).
+# ---------------------------------------------------------------------------
+MAX_CARDS_PER_SLIDE = 3  # ДОЛЖНО совпадать с тем же значением в pptx_slides.py
+
+import threading
+_slide_map_local = threading.local()
+
+
+def compute_dynamic_slide_numbers(tier_programs, bundle_fork):
+    """tier_programs: {"Фундамент": [...], "Ядро": [...], "Надстройка": [...]}
+    — тот же словарь, что уже передаётся в build_script_sections() (ключи
+    отсутствуют для пустых ярусов — см. script_adapter.adapt()). bundle_fork:
+    результат compute_bundle_fork() или None. Возвращает словарь той же формы,
+    что SLIDE_REGISTRY (key: (num, label)), но с ТОЧНЫМИ номерами для этого
+    конкретного клиента."""
+    import math
+
+    registry = {}
+    fixed_prefix = [
+        ("cover", "Обложка"), ("agenda", "Повестка встречи"), ("your_words", "Ваши слова"),
+        ("reasons", "Ваш взгляд на причины"), ("growth_rules", "6 Правил роста"),
+        ("kse_concept", "Что такое КСЭ"), ("symptoms", "Симптомы и корневые причины"),
+        ("maturity_top5", "Ваш индивидуальный Топ-5 вызовов"),
+        ("priority_chain", "Ваши приоритетные КСЭ — цепочка обоснования"),
+        ("cost_only", "Цена бездействия"),
+        ("full_contrast", "Цена бездействия vs Образ будущего"),
+        ("how_to_reach", "Как выйти на этот результат?"),
+        ("kse_list_repeat", "Результаты диагностики — список КСЭ"),
+        ("what_order", "В каком порядке внедрять?"),
+        ("house", "План внедрения — Дом"),
+        ("how_to_implement", "Как внедрять КСЭ? (1 КСЭ = 1 Программа)"),
+        ("what_is_program", "Что такое Консалтинговая программа?"),
+        ("program_model", "Модель передачи знаний"),
+        ("program_model_practice", "Модель на практике"),
+        ("house_continuation", "Порядок внедрения программ"),
+    ]
+    pos = 0
+    for key, label in fixed_prefix:
+        pos += 1
+        registry[key] = (pos, label)
+
+    # Ярусы карточек программ — count слайдов на ярус = ceil(N/3), но не
+    # меньше 1 (пустой ярус тоже занимает ровно 1 слайд-заглушку "не
+    # требуется для Вашего плана" — см. _build_program_cards_slide). Маркер
+    # переключения указывает на ПЕРВЫЙ слайд группы (начало этого раздела
+    # разговора) — дальше Игорь пролистывает следующие слайды той же группы
+    # вручную по ходу речи, отдельные маркеры на "страницу 2 из 2" не нужны.
+    for tier_key, label in (("Фундамент", "Инвестиция и результат — Фундамент"),
+                              ("Ядро", "Инвестиция и результат — Ядро"),
+                              ("Надстройка", "Инвестиция и результат — Надстройка")):
+        n = len(tier_programs.get(tier_key, []))
+        slide_count = max(1, math.ceil(n / MAX_CARDS_PER_SLIDE))
+        registry_key = {"Фундамент": "programs_foundation", "Ядро": "programs_core",
+                         "Надстройка": "programs_superstructure"}[tier_key]
+        pos += 1
+        registry[registry_key] = (pos, label)
+        pos += slide_count - 1  # остальные слайды той же группы, без своего ключа-маркера
+
+    if bundle_fork:
+        pos += 1
+        registry["bundle_fork"] = (pos, "«Возрождение малого бизнеса»")
+
+    for key, label in (("guarantee", "Страховка от сомнений"),
+                         ("loyalty_program", "Программа лояльности"),
+                         ("closing", "Следующие шаги")):
+        pos += 1
+        registry[key] = (pos, label)
+
+    return registry
+
+
+class use_dynamic_slide_numbers:
+    """Контекстный менеджер: на время сборки Скрипта ДЛЯ ТЕКУЩЕГО ПОТОКА
+    подменяет номера слайдов в slide_marker() на точный расчёт для этого
+    конкретного клиента. Через threading.local() — безопасно при нескольких
+    одновременных запросах в одном процессе gunicorn (--threads 4)."""
+    def __init__(self, tier_programs, bundle_fork):
+        self.mapping = compute_dynamic_slide_numbers(tier_programs, bundle_fork)
+
+    def __enter__(self):
+        _slide_map_local.map = self.mapping
+
+    def __exit__(self, *exc):
+        _slide_map_local.map = None
+
+
 def slide_marker(key):
     """Визуально отличимая от read-aloud текста операционная метка — команда
-    Игорю переключить слайд, а не текст для произнесения вслух."""
-    num, label = SLIDE_REGISTRY[key]
+    Игорю переключить слайд, а не текст для произнесения вслух.
+
+    Сначала смотрит в thread-local динамическую карту (устанавливается
+    build_script_sections() через use_dynamic_slide_numbers() — точный расчёт
+    под конкретного клиента), и только если её нет — откатывается на
+    номинальный SLIDE_REGISTRY (нужно для обратной совместимости демо-кода
+    внизу файла)."""
+    registry = getattr(_slide_map_local, "map", None) or SLIDE_REGISTRY
+    num, label = registry[key]
     if num is None:
         return f'\n[⚠ СЛАЙД ЕЩЁ НЕ СОЗДАН — «{label}»]\n'
     return f'\n[→ ПЕРЕКЛЮЧИТЬ НА СЛАЙД {num}: «{label}»]\n'
@@ -1636,26 +1746,34 @@ def render_objections_block(section9, primary_type, all_kse_ordered=None, qualif
 
 def build_script_sections(qualification, stage_name, psychographic_ranks, section9,
                            flow_a_mismatches, top_kse_rows, client_challenge_scores, area_deficit,
-                           mapping, flow_a, all_kse_ordered, tier_programs, flow_b, stage_id):
+                           mapping, flow_a, all_kse_ordered, tier_programs, flow_b, stage_id,
+                           bundle_fork=None):
     """То же содержимое, что build_full_script(), но БЕЗ форматирования под
     консоль/markdown — просто список (заголовок, текст) по Разделам. Нужен
     отдельным потребителям (например, PDF-сборщику Скрипта), которым нужна
-    структура, а не готовая строка с "="*70 разделителями."""
+    структура, а не готовая строка с "="*70 разделителями.
+
+    bundle_fork: результат compute_bundle_fork() (или None) — см.
+    script_adapter.adapt(). До 22.08.2026 этот параметр никогда не
+    передавался, из-за чего развилка "Возрождение малого бизнеса" в Разделе 5б
+    не появлялась ни для одного клиента, даже когда условия показа (пересечение
+    КСЭ ≥4) были выполнены."""
     primary, _ = get_primary_secondary_type(psychographic_ranks)
-    return [
-        ("РАЗДЕЛ 1. ШАПКА", reflow(render_header(qualification, stage_name))),
-        ("РАЗДЕЛ 2. ПСИХОГРАФИЧЕСКИЙ ПРОФИЛЬ", reflow(render_psycho_profile(psychographic_ranks))),
-        ("РАЗДЕЛ 3. УСТАНОВЛЕНИЕ КОНТАКТА", reflow(render_contact_opening(qualification, primary))),
-        ("РАЗДЕЛ 4. ЯДРО ДИАГНОСТИКИ (ПОДТВЕРЖДЕНИЕ ДИАГНОЗА)",
-         reflow(render_diagnostic_core(section9, flow_a_mismatches, top_kse_rows,
-                                        client_challenge_scores, area_deficit, mapping,
-                                        flow_a, primary, flow_b, stage_id))),
-        ("РАЗДЕЛ 5а. УГЛУБЛЕНИЕ БОЛИ", reflow(render_deepen_pain(section9, primary))),
-        ("РАЗДЕЛ 5б. ПРЕЗЕНТАЦИЯ РЕШЕНИЯ",
-         reflow(render_solution_section(section9, all_kse_ordered, tier_programs))),
-        ("РАЗДЕЛ 6. ВОЗРАЖЕНИЯ",
-         reflow(render_objections_block(section9, primary, all_kse_ordered, qualification))),
-    ]
+    with use_dynamic_slide_numbers(tier_programs, bundle_fork):
+        return [
+            ("РАЗДЕЛ 1. ШАПКА", reflow(render_header(qualification, stage_name))),
+            ("РАЗДЕЛ 2. ПСИХОГРАФИЧЕСКИЙ ПРОФИЛЬ", reflow(render_psycho_profile(psychographic_ranks))),
+            ("РАЗДЕЛ 3. УСТАНОВЛЕНИЕ КОНТАКТА", reflow(render_contact_opening(qualification, primary))),
+            ("РАЗДЕЛ 4. ЯДРО ДИАГНОСТИКИ (ПОДТВЕРЖДЕНИЕ ДИАГНОЗА)",
+             reflow(render_diagnostic_core(section9, flow_a_mismatches, top_kse_rows,
+                                            client_challenge_scores, area_deficit, mapping,
+                                            flow_a, primary, flow_b, stage_id))),
+            ("РАЗДЕЛ 5а. УГЛУБЛЕНИЕ БОЛИ", reflow(render_deepen_pain(section9, primary))),
+            ("РАЗДЕЛ 5б. ПРЕЗЕНТАЦИЯ РЕШЕНИЯ",
+             reflow(render_solution_section(section9, all_kse_ordered, tier_programs, bundle_fork))),
+            ("РАЗДЕЛ 6. ВОЗРАЖЕНИЯ",
+             reflow(render_objections_block(section9, primary, all_kse_ordered, qualification))),
+        ]
 
 
 def build_full_script(qualification, stage_name, psychographic_ranks, section9,

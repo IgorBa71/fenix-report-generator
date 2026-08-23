@@ -11,6 +11,7 @@ data["consulting_programs"] (та же авторитетная структур
 import re
 
 from report_text_generator import _normalize_tier, TIER_HEADERS
+from consultation_script_builder import compute_bundle_fork
 
 TIER_KEY_TO_RU_TITLE = {"фундамент": "Фундамент", "ядро": "Ядро", "надстройка": "Надстройка"}
 
@@ -188,6 +189,38 @@ def adapt(diagnose_result, client_response, data, payload=None, top_n_part2=2):
             })
         tier_programs[TIER_KEY_TO_RU_TITLE[tier_key]] = out
 
+    # --- bundle_fork: развилка "Путь А / Путь Б" (Комплексная программа
+    # «Возрождение малого бизнеса», Стадии 1-3). ДО этого исправления (22.08.2026)
+    # этот расчёт в Скрипте отсутствовал вообще — render_solution_section()
+    # вызывалась без bundle_fork, падая на bundle_fork=None по умолчанию, из-за
+    # чего блок пропускался ВСЕГДА, для любого клиента, даже когда пересечение
+    # КСЭ было достаточным и в Презентации слайд 24 корректно строился. Логика
+    # здесь зеркальна pptx_data_export.py:_build_bundle_fork — тот же источник
+    # data["consulting_programs"]["bundle_programs"], тот же compute_bundle_fork(). ---
+    bundle_fork = None
+    bundle = data["consulting_programs"]["bundle_programs"].get("Возрождение малого бизнеса")
+    if bundle and stage_id in bundle.get("ограничение_по_стадиям", [1, 2, 3]):
+        bundle_kse_covered = set(bundle["ксэ_покрывает"])
+        individual_weeks, individual_prices = {}, {}
+        for kse in all_kse_ordered:
+            prog = programs_data.get(kse)
+            if not prog:
+                continue
+            individual_prices[kse] = _price_for_stage(prog, stage_id)
+            weeks = _weeks_for_stage(prog, stage_id)
+            if weeks:
+                individual_weeks[kse] = weeks
+        bundle_weeks_nums = re.findall(r'\d+', bundle["длительность"])
+        bundle_weeks = int(bundle_weeks_nums[0]) if bundle_weeks_nums else None
+        bundle_fork = compute_bundle_fork(
+            all_kse_ordered=all_kse_ordered, stage_id=stage_id,
+            bundle_kse_covered=bundle_kse_covered,
+            bundle_weeks=bundle_weeks,
+            bundle_price=bundle["цена"]["значение"],
+            individual_program_weeks=individual_weeks,
+            individual_program_prices=individual_prices,
+        )
+
     return {
         "qualification": qualification,
         "stage_name": stage_name_full,
@@ -203,4 +236,5 @@ def adapt(diagnose_result, client_response, data, payload=None, top_n_part2=2):
         "tier_programs": tier_programs,
         "flow_b": diagnose_result["поток_б"],
         "stage_id": stage_id,
+        "bundle_fork": bundle_fork,
     }
