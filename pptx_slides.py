@@ -365,13 +365,31 @@ def build_slide_priority_chain(pres, data):
         add_rounded_rect(slide, right_x, ry, right_w, kse_h, fill_color=NAVY)
         caption = kse_captions.get(name, "")
         if caption:
-            # Название — верхняя часть плашки (anchor BOTTOM, чтобы текст
-            # "прижался" к линии раздела с подписью, а не висел в воздухе
-            # посередине пустой верхней половины).
-            add_textbox(slide, name, right_x + Inches(0.2), ry + Inches(0.05), right_w - Inches(0.4), kse_h * 0.6,
-                        size=kse_font, color=GOLD, bold=True, align=PP_ALIGN.CENTER, anchor=MSO_ANCHOR.BOTTOM)
-            add_textbox(slide, caption, right_x + Inches(0.2), ry + kse_h * 0.6, right_w - Inches(0.4), kse_h * 0.4 - Inches(0.05),
-                        size=caption_font, color=RGBColor(0xB9, 0xAF, 0xA5), align=PP_ALIGN.CENTER, anchor=MSO_ANCHOR.TOP)
+            # 23.08.2026 (третий заход): подпись должна остаться на том же
+            # месте, что и в первой версии (top-anchored расчёт ниже) —
+            # меняем ТОЛЬКО позицию названия, не трогая caption_box_y. Раньше
+            # (второй заход) обе позиции считались от одной точки mid_y, и
+            # сдвиг названия вверх автоматически утащил подпись вниз вместе
+            # с ним — Игорь справедливо указал, что менять нужно было только
+            # один элемент.
+            pad_top = Inches(0.05)
+            gap_mid = Inches(0.05)
+            title_h = max(Inches(0.28), kse_h * 0.42)
+            caption_box_y = ry + pad_top + title_h + gap_mid  # НЕ меняется — как в первой версии
+            caption_h = (ry + kse_h - Inches(0.04)) - caption_box_y
+
+            # Название — визуально центрировано по плашке со сдвигом на 2pt
+            # выше середины (Игорь одобрил этот вид), но эта позиция теперь
+            # НИКАК не влияет на caption_box_y выше.
+            mid_y = kse_h // 2 - Pt(2)
+            title_box_y = ry + mid_y - title_h // 2
+
+            add_textbox(slide, name, right_x + Inches(0.15), title_box_y, right_w - Inches(0.3), title_h,
+                        size=kse_font, color=GOLD, bold=True, align=PP_ALIGN.CENTER,
+                        anchor=MSO_ANCHOR.MIDDLE, line_spacing=0.95)
+            add_textbox(slide, caption, right_x + Inches(0.15), caption_box_y, right_w - Inches(0.3), caption_h,
+                        size=caption_font, color=RGBColor(0xB9, 0xAF, 0xA5), align=PP_ALIGN.CENTER,
+                        anchor=MSO_ANCHOR.TOP, line_spacing=0.95)
         else:
             add_textbox(slide, name, right_x + Inches(0.2), ry, right_w - Inches(0.4), kse_h,
                         size=kse_font, color=GOLD, bold=True, align=PP_ALIGN.CENTER, anchor=MSO_ANCHOR.MIDDLE)
