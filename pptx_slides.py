@@ -290,7 +290,7 @@ def build_slide_priority_chain(pres, data):
     # пунктов внутри (до 6 строк на плашку) ---
     ev_groups = [
         ("ПРАВИЛА РОСТА (не выполняются)", ec.get("growthRuleMismatches") or []),
-        ("ВЫЗОВЫ (Вы отметили как острые)", ec.get("challenges") or []),
+        ("ВЫЗОВЫ (Вы отметили как острые: 6+ баллов)", ec.get("challenges") or []),
         ("ОБЛАСТИ БИЗНЕСА (просели)", ec.get("areas") or []),
     ]
     max_items = max((len(items) for _, items in ev_groups), default=1) or 1
@@ -324,25 +324,57 @@ def build_slide_priority_chain(pres, data):
         add_rounded_rect(slide, left_x, y, left_w, h, fill_color=OFFWHITE, line_color=TERRACOTTA, line_width_pt=1.5, radius=0.06)
         add_textbox(slide, label, left_x + Inches(0.25), y + Inches(0.1), left_w - Inches(0.5), header_h,
                     size=10.5, color=TERRACOTTA, bold=True)
-        add_bullets(slide, items or ["—"], left_x + Inches(0.25), y + header_h, left_w - Inches(0.5), h - header_h - Inches(0.08),
-                    size=bullet_size, color=DARKTEXT)
+        # 22.08.2026: блок "ВЫЗОВЫ" — нумерованный список (не буллеты), а
+        # два других блока ("Правила роста", "Области") — как были, с
+        # буллетами. Номера нужны, чтобы под каждым КСЭ в правой колонке
+        # можно было компактно сослаться "Вызов 1, 7" вместо полного текста
+        # (см. kseCaptions в pptx_data_export.py) — нумерация здесь и там
+        # обязана совпадать: и тут, и в _build_evidence_chain порядок
+        # пунктов ОДИНАКОВЫЙ (одна и та же сортировка по убыванию балла),
+        # так что просто enumerate() по items даёт тот же номер, что уже
+        # использован при построении kseCaptions.
+        if label.startswith("ВЫЗОВЫ") and items:
+            numbered_items = [f"{i + 1}. {item}" for i, item in enumerate(items)]
+            add_textbox(slide, numbered_items, left_x + Inches(0.25), y + header_h, left_w - Inches(0.5), h - header_h - Inches(0.08),
+                        size=bullet_size, color=DARKTEXT, line_spacing=1.1)
+        else:
+            add_bullets(slide, items or ["—"], left_x + Inches(0.25), y + header_h, left_w - Inches(0.5), h - header_h - Inches(0.08),
+                        size=bullet_size, color=DARKTEXT)
         box_positions.append((y, h))
         y += h + left_gap
 
     # --- правая колонка: реальные КСЭ, к которым привела эта цепочка —
     # от 1 до 10+ плашек, высота и шрифт подстраиваются под количество ---
-    related_kse = ec.get("relatedKse") or data["allKseOrdered"][:3]
+    # 22.08.2026: показываем ВСЕ рекомендованные КСЭ (не только первые 3) —
+    # Игорь подтвердил, что урезка top-3 не нужна.
+    related_kse = ec.get("relatedKse") or data["allKseOrdered"]
     n_kse = max(len(related_kse), 1)
     kse_gap = min(Inches(0.2), int(avail_h / n_kse * 0.18))
     kse_h = min(Inches(1.15), (avail_h - kse_gap * (n_kse - 1)) // n_kse)
     kse_font = 13 if n_kse <= 3 else max(9.0, 13 - (n_kse - 3) * 0.7)
+    # Подпись-обоснование под названием — компактная ссылка на конкретные
+    # пункты левой колонки ("Вызов 1, 7" и т.п., см. kseCaptions в
+    # pptx_data_export.py). Заметно мельче названия, чтобы не спорить с ним
+    # за внимание, но всегда читаема (не меньше 7pt).
+    caption_font = max(7.0, kse_font - 4)
+    kse_captions = ec.get("kseCaptions") or {}
 
     ry = top_y
     right_bottom = ry
     for name in related_kse:
         add_rounded_rect(slide, right_x, ry, right_w, kse_h, fill_color=NAVY)
-        add_textbox(slide, name, right_x + Inches(0.2), ry, right_w - Inches(0.4), kse_h,
-                    size=kse_font, color=GOLD, bold=True, align=PP_ALIGN.CENTER, anchor=MSO_ANCHOR.MIDDLE)
+        caption = kse_captions.get(name, "")
+        if caption:
+            # Название — верхняя часть плашки (anchor BOTTOM, чтобы текст
+            # "прижался" к линии раздела с подписью, а не висел в воздухе
+            # посередине пустой верхней половины).
+            add_textbox(slide, name, right_x + Inches(0.2), ry + Inches(0.05), right_w - Inches(0.4), kse_h * 0.6,
+                        size=kse_font, color=GOLD, bold=True, align=PP_ALIGN.CENTER, anchor=MSO_ANCHOR.BOTTOM)
+            add_textbox(slide, caption, right_x + Inches(0.2), ry + kse_h * 0.6, right_w - Inches(0.4), kse_h * 0.4 - Inches(0.05),
+                        size=caption_font, color=RGBColor(0xB9, 0xAF, 0xA5), align=PP_ALIGN.CENTER, anchor=MSO_ANCHOR.TOP)
+        else:
+            add_textbox(slide, name, right_x + Inches(0.2), ry, right_w - Inches(0.4), kse_h,
+                        size=kse_font, color=GOLD, bold=True, align=PP_ALIGN.CENTER, anchor=MSO_ANCHOR.MIDDLE)
         ry += kse_h + kse_gap
         right_bottom = ry - kse_gap
 

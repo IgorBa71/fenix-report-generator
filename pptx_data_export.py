@@ -56,19 +56,32 @@ def _build_growth_rules(flow_a):
     ]
 
 
-def _build_evidence_chain(flow_a, client_challenge_scores, area_deficit, all_kse_ordered,
-                           top_n_related_kse=6, challenge_threshold=6):
+def _build_evidence_chain(flow_a, client_challenge_scores, area_deficit, all_kse_ordered, mapping,
+                           top_n_related_kse=None, challenge_threshold=6):
     """relatedKse — реальные КСЭ, к которым привела эта цепочка обоснования
     (не демо-заглушка): «Критерии роста бизнеса» первой, если есть
     несоответствия по Правилам роста, затем следующие по приоритету КСЭ из
     остальных. Слайд №9 отрисовывает СТОЛЬКО плашек, сколько элементов в
-    списке (до top_n_related_kse).
+    списке.
+
+    22.08.2026: top_n_related_kse по умолчанию БЕЗ ограничения (было 6) —
+    Игорь подтвердил, что правая колонка слайда №9 должна показывать ВСЕ
+    рекомендованные клиенту КСЭ, а не top-N урезку.
 
     challenges — ВСЕ 24 Вызова, которые клиент оценил >= challenge_threshold
     (та же планка «острый», что использует _find_symptom_challenges в
     report_text_generator.py для обоснования конкретных КСЭ в Скрипте) — НЕ
-    top-3 от top-5, как было раньше. В реальном сценарии таких вызовов может
-    быть заметно больше 3-5, слайд №9 должен вмещать их все."""
+    top-3 от top-5, как было раньше.
+
+    kseCaptions: {kse_name: "Правила роста · Вызовы 1, 7 · Область: Финансы"}
+    — компактная подпись под каждой плашкой КСЭ в правой колонке (номера
+    Вызовов ссылаются на нумерованный список в левой колонке "ВЫЗОВЫ" —
+    см. build_slide_priority_chain в pptx_slides.py, там та же нумерация
+    "1. 2. 3. ..." по порядку списка challenges). Используем ту же логику
+    связи КСЭ ↔ Вызов/Область, что report_text_generator._find_symptom_
+    challenges/_find_deficit_areas — просто в обратную сторону (для каждого
+    КСЭ ищем, какие пункты левой колонки на него указывают), не выдумываем
+    новую."""
     growth_rule_mismatches = [m.split(" (")[0] for m in flow_a["mismatches"]
                                if m.split(" (")[0] != "Непреложные правила"]
     challenges = sorted(
@@ -83,14 +96,32 @@ def _build_evidence_chain(flow_a, client_challenge_scores, area_deficit, all_kse
     for kse in all_kse_ordered:
         if kse not in related_kse:
             related_kse.append(kse)
-        if len(related_kse) >= top_n_related_kse:
+        if top_n_related_kse is not None and len(related_kse) >= top_n_related_kse:
             break
+
+    auto_triggers = flow_a.get("auto_triggers", {})
+    kse_captions = {}
+    for kse in related_kse:
+        parts = []
+        if auto_triggers.get(kse):
+            parts.append("Правила роста")
+        linked_nums = [str(i + 1) for i, c in enumerate(challenges)
+                       if kse in mapping["challenge_to_kse"].get(c, [])]
+        if linked_nums:
+            label = "Вызов" if len(linked_nums) == 1 else "Вызовы"
+            parts.append(f"{label} {', '.join(linked_nums)}")
+        linked_areas = [a for a in areas if kse in mapping["business_area_to_kse"].get(a, [])]
+        if linked_areas:
+            label = "Область" if len(linked_areas) == 1 else "Области"
+            parts.append(f"{label}: {', '.join(linked_areas)}")
+        kse_captions[kse] = " · ".join(parts) if parts else "Приоритетный элемент для Вашей Стадии"
 
     return {
         "growthRuleMismatches": growth_rule_mismatches,
         "challenges": challenges,
         "areas": areas,
         "relatedKse": related_kse,
+        "kseCaptions": kse_captions,
     }
 
 
@@ -224,7 +255,7 @@ def export_pptx_data(diagnose_result, client_response, data, payload=None, top_n
         },
         "section9": adapted["section9"],
         "growthRules": _build_growth_rules(flow_a),
-        "evidenceChain": _build_evidence_chain(flow_a, adapted["client_challenge_scores"], adapted["area_deficit"], adapted["all_kse_ordered"]),
+        "evidenceChain": _build_evidence_chain(flow_a, adapted["client_challenge_scores"], adapted["area_deficit"], adapted["all_kse_ordered"], adapted["mapping"]),
         "maturityTop5": _build_maturity_top5(flow_b, stage_id, primary_type, data),
         "allKseOrdered": adapted["all_kse_ordered"],
         # ВЕСЬ список — слайд №13 должен 1-в-1 совпадать по количеству с
