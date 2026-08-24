@@ -602,20 +602,22 @@ def generate_report():
         order_id = payload.get("order_id")
         if order_id:
             try:
-                orders = _load_orders()
-                if order_id in orders:
-                    orders[order_id]["report_pdf_base64"] = pdf_base64
+                # 24.08.2026: было _load_orders()/_save_orders() — загрузка и
+                # перезапись ВСЕЙ таблицы заказов ради одного order_id.
+                order = _load_order(order_id)
+                if order is not None:
+                    order["report_pdf_base64"] = pdf_base64
                     # Скрипт и Презентация сохраняются ОТДЕЛЬНЫМИ полями и
                     # используются ТОЛЬКО в /admin (кнопка "прислать мне 3
                     # файла"). Автоматический Сц2 (send_delayed_report_to_clients)
                     # эти поля не читает вообще — клиенту они физически не
                     # могут уйти по ошибке.
-                    orders[order_id]["script_pdf_base64"] = script_pdf_base64 or ""
-                    orders[order_id]["presentation_base64"] = presentation_base64 or ""
-                    orders[order_id]["report_number"] = report_number
-                    orders[order_id]["client_email"] = q.get("email", "")
-                    orders[order_id]["client_name"] = q.get("name", "")
-                    _save_orders(orders)
+                    order["script_pdf_base64"] = script_pdf_base64 or ""
+                    order["presentation_base64"] = presentation_base64 or ""
+                    order["report_number"] = report_number
+                    order["client_email"] = q.get("email", "")
+                    order["client_name"] = q.get("name", "")
+                    _save_order(order_id, order)
 
                     # 22.08.2026: мгновенное письмо-подтверждение клиенту, сразу
                     # после прохождения опросника (не путать с Сц2 — тем, что
@@ -823,14 +825,36 @@ def _load_statements():
 # ---------------------------------------------------------------------------
 import psycopg
 import psycopg.rows
+from psycopg_pool import ConnectionPool
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
+# 24.08.2026: раньше каждый вызов _get_db_connection() открывал новое
+# соединение psycopg.connect(DATABASE_URL) — при SSL verify-full это полный
+# TLS-хендшейк с проверкой сертификата на КАЖДЫЙ, даже самый мелкий запрос
+# (например, /payment-status при поллинге с фронтенда каждые 1-2 сек).
+# Обнаружено как причина зависаний 4-9 сек на переходе Шаг 3 → Опросник.
+# Теперь используется пул соединений — TLS-хендшейк происходит один раз на
+# каждое из нескольких соединений в пуле, дальше они переиспользуются.
+_db_pool: ConnectionPool | None = None
 
-def _get_db_connection():
+
+def _get_pool() -> ConnectionPool:
+    global _db_pool
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL не задана в переменных окружения")
-    return psycopg.connect(DATABASE_URL)
+    if _db_pool is None:
+        # min_size/max_size невелики намеренно — конфигурация Timeweb сейчас
+        # 1 CPU / 1 ГБ RAM, лишние простаивающие соединения к БД тоже
+        # расходуют память. Если позже поднимете тариф — можно увеличить.
+        _db_pool = ConnectionPool(DATABASE_URL, min_size=1, max_size=4, open=True)
+    return _db_pool
+
+
+def _get_db_connection():
+    """Возвращает контекстный менеджер соединения из пула — использовать
+    как и раньше: `with _get_db_connection() as conn: ...`."""
+    return _get_pool().connection()
 
 
 def _init_orders_table():
@@ -859,7 +883,13 @@ def _load_orders():
 
 def _save_orders(orders):
     """Перезаписывает все заказы разом — сохраняем ту же сигнатуру функции,
-    что была у файловой версии, чтобы не трогать вызывающий код."""
+    что была у файловой версии, чтобы не трогать вызывающий код.
+
+    ВНИМАНИЕ: перебирает и перезаписывает КАЖДЫЙ заказ в таблице, даже если
+    менялся только один. Годится для мест, где реально нужно сохранить
+    несколько заказов разом, но НЕ используйте для горячих путей (частый
+    поллинг/один заказ за раз) — там используйте _load_order/_save_order
+    ниже, которые работают с одной строкой через WHERE order_id = %s."""
     with _get_db_connection() as conn:
         with conn.cursor() as cur:
             for order_id, order_data in orders.items():
@@ -873,6 +903,64 @@ def _save_orders(orders):
                     (order_id, json.dumps(order_data, ensure_ascii=False)),
                 )
         conn.commit()
+
+
+def _load_order(order_id):
+    """24.08.2026: точечный запрос ОДНОГО заказа по order_id вместо
+    выгрузки всей таблицы (как делал _load_orders()). Используется в
+    горячих путях — /payment-status, /verify-payform-redirect — которые
+    дергаются поллингом с фронтенда много раз подряд. Возвращает dict с
+    данными заказа или None, если заказ не найден."""
+    with _get_db_connection() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute("SELECT data FROM orders WHERE order_id = %s", (order_id,))
+            row = cur.fetchone()
+    return row["data"] if row else None
+
+
+def _save_order(order_id, order_data):
+    """24.08.2026: точечное сохранение ОДНОГО заказа вместо перезаписи всей
+    таблицы (как делал _save_orders()). Пара к _load_order()."""
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO orders (order_id, data, updated_at)
+                VALUES (%s, %s, now())
+                ON CONFLICT (order_id)
+                DO UPDATE SET data = EXCLUDED.data, updated_at = now()
+                """,
+                (order_id, json.dumps(order_data, ensure_ascii=False)),
+            )
+        conn.commit()
+
+
+def _count_orders():
+    """24.08.2026: лёгкий COUNT(*) для логов вместо загрузки всей таблицы
+    только ради len(orders)."""
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM orders")
+            (count,) = cur.fetchone()
+    return count
+
+
+def _find_orders_by_email(email):
+    """24.08.2026: поиск заказов по email клиента через SQL-фильтр по полю
+    JSONB (data->>'client_email'), а не загрузкой всей таблицы в Python и
+    фильтрацией в памяти (как делала админ-панель раньше). Используется в
+    /admin — там это разовый ручной поиск, но по мере роста базы полная
+    загрузка стала бы всё медленнее, поэтому сразу делаем через WHERE.
+    Возвращает список (order_id, data), тот же формат, что ждёт вызывающий
+    код."""
+    with _get_db_connection() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT order_id, data FROM orders WHERE lower(data->>'client_email') = lower(%s)",
+                (email,),
+            )
+            rows = cur.fetchall()
+    return [(row["order_id"], row["data"]) for row in rows]
 
 
 # Таблица должна существовать до первого запроса — создаём при старте
@@ -956,8 +1044,9 @@ def create_payment_link():
         query = urlencode(_flatten_for_query(data))
         payment_url = f"{PRODAMUS_FORM_URL}?{query}"
 
-        orders = _load_orders()
-        orders[order_id] = {
+        # 24.08.2026: создание заказа — не требует загрузки всей таблицы
+        # заранее (это НОВАЯ запись, не апдейт существующей).
+        new_order = {
             "paid": False,
             "stage_id": stage_id,
             "price": price,
@@ -973,9 +1062,9 @@ def create_payment_link():
             "utm_term": payload.get("utm_term", ""),
             "yandex_client_id": payload.get("yandex_client_id", ""),
         }
-        _save_orders(orders)
+        _save_order(order_id, new_order)
         print(f"DEBUG create-payment-link: заказ {order_id!r} сохранён. "
-              f"Всего заказов в БД теперь: {len(orders)}", flush=True)
+              f"Всего заказов в БД теперь: {_count_orders()}", flush=True)
 
         return jsonify({"ok": True, "order_id": order_id, "payment_url": payment_url})
     except Exception as e:
@@ -1115,28 +1204,30 @@ def prodamus_webhook():
     order_id = incoming.get("order_num", "")
     payment_status = incoming.get("payment_status", "")
 
-    orders = _load_orders()
+    # 24.08.2026: было _load_orders() — загрузка ВСЕЙ таблицы (включая
+    # печать списка всех order_id в БД, что тоже росло бы вместе с базой).
+    # Заменено на точечный запрос одного заказа.
+    order = _load_order(order_id)
     print(f"DEBUG webhook: order_id из вебхука = {order_id!r}", flush=True)
-    print(f"DEBUG webhook: заказ найден в БД? {order_id in orders}", flush=True)
-    print(f"DEBUG webhook: все order_id сейчас в БД: {list(orders.keys())}", flush=True)
-    if order_id in orders:
-        orders[order_id]["paid"] = (payment_status == "success")
-        orders[order_id]["paid_at"] = datetime.now().isoformat()
-        orders[order_id]["raw_status"] = payment_status
-        _save_orders(orders)
-        print(f"DEBUG webhook: заказ {order_id!r} обновлён, paid={orders[order_id]['paid']}", flush=True)
+    print(f"DEBUG webhook: заказ найден в БД? {order is not None}", flush=True)
+    if order is not None:
+        order["paid"] = (payment_status == "success")
+        order["paid_at"] = datetime.now().isoformat()
+        order["raw_status"] = payment_status
+        _save_order(order_id, order)
+        print(f"DEBUG webhook: заказ {order_id!r} обновлён, paid={order['paid']}", flush=True)
 
-        if orders[order_id]["paid"]:
+        if order["paid"]:
             send_metrika_offline_conversion(
-                client_id=orders[order_id].get("yandex_client_id", ""),
+                client_id=order.get("yandex_client_id", ""),
                 order_id=order_id,
-                price=orders[order_id].get("price", ""),
+                price=order.get("price", ""),
                 utm={
-                    "utm_source": orders[order_id].get("utm_source", ""),
-                    "utm_medium": orders[order_id].get("utm_medium", ""),
-                    "utm_campaign": orders[order_id].get("utm_campaign", ""),
-                    "utm_content": orders[order_id].get("utm_content", ""),
-                    "utm_term": orders[order_id].get("utm_term", ""),
+                    "utm_source": order.get("utm_source", ""),
+                    "utm_medium": order.get("utm_medium", ""),
+                    "utm_campaign": order.get("utm_campaign", ""),
+                    "utm_content": order.get("utm_content", ""),
+                    "utm_term": order.get("utm_term", ""),
                 },
             )
     else:
@@ -1191,14 +1282,19 @@ def verify_payform_redirect():
         order_id = payform_order_id
         paid = (status == "success")
 
-        orders = _load_orders()
-        if order_id in orders:
+        # 24.08.2026: было _load_orders()/_save_orders() — загрузка и
+        # перезапись ВСЕЙ таблицы заказов ради проверки одного order_id.
+        # Заменено на точечный запрос/апдейт одной строки — это и была
+        # основная причина зависаний 4-9 сек на поллинге при переходе
+        # Шаг 3 → Опросник (нагрузка росла вместе с числом заказов в БД).
+        order = _load_order(order_id)
+        if order is not None:
             if paid:
-                orders[order_id]["paid"] = True
-                orders[order_id]["paid_at"] = datetime.now().isoformat()
-                orders[order_id]["raw_status"] = status
-                orders[order_id]["confirmed_via"] = "redirect"
-                _save_orders(orders)
+                order["paid"] = True
+                order["paid_at"] = datetime.now().isoformat()
+                order["raw_status"] = status
+                order["confirmed_via"] = "redirect"
+                _save_order(order_id, order)
             print(f"DEBUG verify-payform-redirect: заказ {order_id!r} проверен, "
                   f"paid={paid}", flush=True)
         else:
@@ -1215,9 +1311,12 @@ def verify_payform_redirect():
 def payment_status(order_id):
     """Опросник опрашивает этот эндпоинт после открытия окна оплаты, чтобы
     узнать, подтвердил ли Продамус оплату, прежде чем открыть доступ
-    к разделам диагностики."""
-    orders = _load_orders()
-    order = orders.get(order_id)
+    к разделам диагностики.
+
+    24.08.2026: было _load_orders() — загрузка ВСЕЙ таблицы заказов ради
+    статуса одного order_id, при поллинге каждые 1-2 сек это и было
+    основной причиной зависаний. Заменено на точечный запрос."""
+    order = _load_order(order_id)
     if not order:
         return jsonify({"ok": False, "error": "order not found"}), 404
     return jsonify({"ok": True, "paid": order.get("paid", False)})
@@ -1310,7 +1409,11 @@ def send_delayed_report_to_clients():
                 attachments=[("Otchet.pdf", pdf_base64)],
             )
             orders[order_id]["client_sent_at"] = now.isoformat()
-            _save_orders(orders)
+            # 24.08.2026: было _save_orders(orders) — перезапись ВСЕЙ
+            # таблицы ради одного изменённого заказа. Само сканирование
+            # всех заказов раз в час — нормально, а вот перезапись всех
+            # при каждой найденной отправке — нет.
+            _save_order(order_id, orders[order_id])
             sent_count += 1
             print(f"DEBUG Сц2: Отчёт отправлен клиенту {client_email} (order_id={order_id!r})", flush=True)
             send_max_alert(f"✅ Отчёт отправлен клиенту {client_email} (№{report_number})")
@@ -1369,7 +1472,7 @@ def check_stuck_orders():
             f"Проверь вручную через /admin"
         )
         orders[order_id]["stuck_alert_sent"] = now.isoformat()
-        _save_orders(orders)
+        _save_order(order_id, orders[order_id])
 
 
 @app.route("/resend-report/<order_id>", methods=["POST"])
@@ -1379,8 +1482,7 @@ def resend_report(order_id):
     конкретным order_id, если клиент не получил письмо и просит прислать
     повторно. Клиенту уходит ТОЛЬКО Отчёт, как и в основном отложенном
     сценарии — Скрипт/Презентация здесь тоже не участвуют."""
-    orders = _load_orders()
-    order = orders.get(order_id)
+    order = _load_order(order_id)
     if not order:
         return jsonify({"ok": False, "error": "order not found"}), 404
 
@@ -1412,8 +1514,8 @@ def resend_report(order_id):
             ),
             attachments=[("Otchet.pdf", pdf_base64)],
         )
-        orders[order_id]["client_sent_at"] = datetime.now().isoformat()
-        _save_orders(orders)
+        order["client_sent_at"] = datetime.now().isoformat()
+        _save_order(order_id, order)
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -1541,11 +1643,10 @@ def admin_dashboard():
         message_html = f'<p class="{"err" if is_err else "msg"}">{results_html_msg}</p>'
 
     if email:
-        orders = _load_orders()
-        matches = [
-            (oid, o) for oid, o in orders.items()
-            if o.get("client_email", "").strip().lower() == email
-        ]
+        # 24.08.2026: было _load_orders() + фильтрация в Python — загрузка
+        # ВСЕЙ таблицы ради поиска по одному email. Заменено на SQL-фильтр
+        # по полю data->>'client_email' (_find_orders_by_email).
+        matches = _find_orders_by_email(email)
         if not matches:
             results_html = f"<p>Заказы с email <b>{email}</b> не найдены.</p>"
         else:
@@ -1579,8 +1680,7 @@ def admin_dashboard():
 def admin_send_client(order_id):
     """Кнопка «Отправить Отчёт клиенту» — уходит ТОЛЬКО PDF Отчёта, тот же
     текст письма, что и в автоматическом Сц2."""
-    orders = _load_orders()
-    order = orders.get(order_id)
+    order = _load_order(order_id)
     if not order or not order.get("report_pdf_base64"):
         return redirect(url_for("admin_dashboard", email=order.get("client_email", "") if order else "",
                                  msg="Отчёт для этого заказа ещё не готов", err="1"))
@@ -1604,8 +1704,8 @@ def admin_send_client(order_id):
             ),
             attachments=[("Otchet.pdf", order["report_pdf_base64"])],
         )
-        orders[order_id]["client_sent_at"] = datetime.now().isoformat()
-        _save_orders(orders)
+        order["client_sent_at"] = datetime.now().isoformat()
+        _save_order(order_id, order)
         return redirect(url_for("admin_dashboard", email=client_email, msg="Отчёт отправлен клиенту"))
     except Exception as e:
         return redirect(url_for("admin_dashboard", email=client_email, msg=f"Ошибка отправки: {e}", err="1"))
@@ -1617,8 +1717,7 @@ def admin_send_me(order_id):
     """Кнопка «Прислать мне 3 файла» — Отчёт + Скрипт консультации +
     Презентация уходят на IGOR_NOTIFICATION_EMAIL, для подготовки к
     консультации, если исходное письмо Сц1 не дошло."""
-    orders = _load_orders()
-    order = orders.get(order_id)
+    order = _load_order(order_id)
     client_email = order.get("client_email", "") if order else ""
     if not order or not order.get("report_pdf_base64"):
         return redirect(url_for("admin_dashboard", email=client_email, msg="Файлы для этого заказа ещё не готовы", err="1"))

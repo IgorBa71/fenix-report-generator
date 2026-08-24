@@ -375,21 +375,31 @@ def build_slide_priority_chain(pres, data):
             pad_top = Inches(0.05)
             gap_mid = Inches(0.05)
             title_h = max(Inches(0.28), kse_h * 0.42)
-            caption_box_y = ry + pad_top + title_h + gap_mid  # НЕ меняется — как в первой версии
+            # 24.08.2026: подпись поднята на 3pt по правке Игоря (была
+            # ry + pad_top + title_h + gap_mid без сдвига).
+            caption_box_y = ry + pad_top + title_h + gap_mid - Pt(3)
             caption_h = (ry + kse_h - Inches(0.04)) - caption_box_y
 
-            # Название — визуально центрировано по плашке со сдвигом на 2pt
-            # выше середины (Игорь одобрил этот вид), но эта позиция теперь
-            # НИКАК не влияет на caption_box_y выше.
-            mid_y = kse_h // 2 - Pt(2)
+            # Название — визуально центрировано по плашке. Было смещение
+            # на 2pt выше середины, 24.08.2026 добавлен ещё 1pt по правке
+            # Игоря (итого 3pt выше середины). Эта позиция по-прежнему НЕ
+            # влияет на caption_box_y выше.
+            mid_y = kse_h // 2 - Pt(3)
             title_box_y = ry + mid_y - title_h // 2
+
+            # 24.08.2026: межстрочный интервал в подписи уменьшен на 2pt.
+            # Раньше задавался относительным множителем (line_spacing=0.95),
+            # что не позволяет вычесть фиксированные pt — переведено в
+            # явное значение в пунктах (примерная высота строки при 0.95)
+            # минус 2pt.
+            caption_line_spacing = Pt(caption_font * 1.2 * 0.95) - Pt(2)
 
             add_textbox(slide, name, right_x + Inches(0.15), title_box_y, right_w - Inches(0.3), title_h,
                         size=kse_font, color=GOLD, bold=True, align=PP_ALIGN.CENTER,
                         anchor=MSO_ANCHOR.MIDDLE, line_spacing=0.95)
             add_textbox(slide, caption, right_x + Inches(0.15), caption_box_y, right_w - Inches(0.3), caption_h,
                         size=caption_font, color=RGBColor(0xB9, 0xAF, 0xA5), align=PP_ALIGN.CENTER,
-                        anchor=MSO_ANCHOR.TOP, line_spacing=0.95)
+                        anchor=MSO_ANCHOR.TOP, line_spacing=caption_line_spacing)
         else:
             add_textbox(slide, name, right_x + Inches(0.2), ry, right_w - Inches(0.4), kse_h,
                         size=kse_font, color=GOLD, bold=True, align=PP_ALIGN.CENTER, anchor=MSO_ANCHOR.MIDDLE)
