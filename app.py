@@ -1532,45 +1532,61 @@ def _yadisk_upload(filename: str, content: bytes):
         raise RuntimeError(f"не удалось загрузить файл на Диск: {put_resp.status_code} {put_resp.text[:300]}")
 
 
-def backup_database():
-    """Ежедневный бэкап БД: pg_dump -> gzip -> загрузка на Яндекс.Диск
-    (папка YANDEX_DISK_BACKUP_FOLDER в корне Диска).
-
-    26.08.2026, переезд на Dockhost: в отличие от Timeweb (managed PostgreSQL
-    с бэкапами на стороне платформы), на Dockhost PostgreSQL — обычный
-    Docker-контейнер с подключённым сетевым диском, бэкапы целиком на нашей
-    ответственности. Специально не пишем дамп на тот же/соседний сетевой
-    диск, где лежит сама БД — если откажет диск или контейнер, бэкап должен
-    пережить это. Яндекс.Диск выбран по прямому пожеланию Игоря (не email) —
-    удобнее находить и открывать файлы бэкапов напрямую в привычном
-    хранилище. Ротация старых бэкапов (хранить последние 7) — TODO,
-    пока не реализована, файлы копятся; вернуться к этому отдельным шагом."""
+def _run_backup_database() -> int:
+    """«Ядро» бэкапа: pg_dump -> gzip -> загрузка на Яндекс.Диск. В отличие
+    от backup_database() ничего не ловит и не глушит — при любой проблеме
+    выбрасывает исключение с понятным текстом. Так и планировщик (через
+    backup_database), и ручной вызов из /admin/backup-now (напрямую) могут
+    сами решить, что делать с результатом — планировщик тихо алертит в MAX,
+    а ручной вызов сразу показывает Игорю настоящую причину сбоя, а не
+    универсальное сообщение независимо от исхода.
+    Возвращает размер загруженного сжатого файла в байтах."""
     if not DATABASE_URL:
-        print("DEBUG backup_database: DATABASE_URL не задана, бэкап пропущен", flush=True)
-        return
+        raise RuntimeError("DATABASE_URL не задана в переменных окружения")
     if not YANDEX_DISK_TOKEN:
-        print("DEBUG backup_database: YANDEX_DISK_TOKEN не задан, бэкап пропущен", flush=True)
-        return
-    date_str = datetime.now().strftime("%Y-%m-%d")
+        raise RuntimeError("YANDEX_DISK_TOKEN не задан в переменных окружения")
+
+    date_str = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    dump = subprocess.run(
+        ["pg_dump", DATABASE_URL, "--format=plain", "--no-owner", "--no-privileges"],
+        capture_output=True, timeout=300,
+    )
+    if dump.returncode != 0:
+        raise RuntimeError(f"pg_dump завершился с ошибкой (код {dump.returncode}): {dump.stderr[:500].decode('utf-8', 'replace')}")
+
+    compressed = gzip.compress(dump.stdout)
+    filename = f"fenix_orders_backup_{date_str}.sql.gz"
+
+    _yadisk_ensure_folder()
+    _yadisk_upload(filename, compressed)
+
+    return len(compressed)
+
+
+def backup_database():
+    """Обёртка для планировщика (job раз в сутки, см. ниже) — вызывает
+    _run_backup_database(), при ошибке шлёт алерт в MAX вместо падения
+    всего процесса.
+
+    26.08.2026, переезд на Dockhost: в отличие от Timeweb (managed
+    PostgreSQL с бэкапами на стороне платформы), на Dockhost PostgreSQL —
+    обычный Docker-контейнер с подключённым сетевым диском, бэкапы целиком
+    на нашей ответственности. Специально не пишем дамп на тот же/соседний
+    сетевой диск, где лежит сама БД — если откажет диск или контейнер,
+    бэкап должен пережить это. Яндекс.Диск выбран по прямому пожеланию
+    Игоря (не email) — удобнее находить и открывать файлы бэкапов
+    напрямую в привычном хранилище. Ротация старых бэкапов (хранить
+    последние 7) — TODO, пока не реализована, файлы копятся; вернуться
+    к этому отдельным шагом."""
     try:
-        dump = subprocess.run(
-            ["pg_dump", DATABASE_URL, "--format=plain", "--no-owner", "--no-privileges"],
-            capture_output=True, check=True, timeout=300,
-        )
-        compressed = gzip.compress(dump.stdout)
-        filename = f"fenix_orders_backup_{date_str}.sql.gz"
-
-        _yadisk_ensure_folder()
-        _yadisk_upload(filename, compressed)
-
-        print(f"DEBUG backup_database: бэкап загружен на Яндекс.Диск, размер {len(compressed)} байт", flush=True)
-    except subprocess.CalledProcessError as e:
-        err = (e.stderr or b"")[:500]
-        print(f"DEBUG backup_database: pg_dump завершился с ошибкой: {err}", flush=True)
-        send_max_alert(f"🔴 Бэкап БД за {date_str} НЕ создан — pg_dump упал с ошибкой.\nПроверь вручную.")
+        size = _run_backup_database()
+        print(f"DEBUG backup_database: бэкап загружен на Яндекс.Диск, размер {size} байт", flush=True)
     except Exception as e:
+        date_str = datetime.now().strftime("%Y-%m-%d")
         print(f"DEBUG backup_database: не удалось выполнить/загрузить бэкап: {e}", flush=True)
         send_max_alert(f"🔴 Бэкап БД за {date_str} НЕ создан/НЕ загружен на Диск.\nПричина: {e}\nПроверь вручную.")
+
+
 
 
 @app.route("/resend-report/<order_id>", methods=["POST"])
@@ -1849,15 +1865,16 @@ def admin_send_me(order_id):
 @app.route("/admin/backup-now", methods=["POST"])
 @admin_required
 def admin_backup_now():
-    """26.08.2026: ручной запуск backup_database() вне расписания —
-    проверка сразу после настройки YANDEX_DISK_TOKEN на Dockhost, не
-    дожидаясь ближайшего 07:00 МСК. Может пригодиться и позже — например,
-    внеплановый бэкап перед рискованной операцией."""
+    """26.08.2026: ручной запуск бэкапа вне расписания — вызывает
+    _run_backup_database() НАПРЯМУЮ (не через backup_database(), которая
+    сама глушит все ошибки для планировщика) — чтобы сразу увидеть
+    настоящий результат: либо точный размер загруженного файла, либо
+    точный текст ошибки, без необходимости лезть в логи контейнера."""
     try:
-        backup_database()
-        return redirect(url_for("admin_dashboard", msg="Бэкап запущен — проверьте папку на Яндекс.Диске и логи контейнера"))
+        size = _run_backup_database()
+        return redirect(url_for("admin_dashboard", msg=f"Бэкап загружен на Яндекс.Диск, размер {size} байт"))
     except Exception as e:
-        return redirect(url_for("admin_dashboard", msg=f"Ошибка запуска бэкапа: {e}", err="1"))
+        return redirect(url_for("admin_dashboard", msg=f"Ошибка бэкапа: {e}", err="1"))
 
 
 if __name__ == "__main__":
