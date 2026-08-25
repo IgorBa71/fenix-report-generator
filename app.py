@@ -1846,5 +1846,19 @@ def admin_send_me(order_id):
         return redirect(url_for("admin_dashboard", email=client_email, msg=f"Ошибка отправки: {e}", err="1"))
 
 
+@app.route("/admin/backup-now", methods=["POST"])
+@admin_required
+def admin_backup_now():
+    """26.08.2026: ручной запуск backup_database() вне расписания —
+    проверка сразу после настройки YANDEX_DISK_TOKEN на Dockhost, не
+    дожидаясь ближайшего 07:00 МСК. Может пригодиться и позже — например,
+    внеплановый бэкап перед рискованной операцией."""
+    try:
+        backup_database()
+        return redirect(url_for("admin_dashboard", msg="Бэкап запущен — проверьте папку на Яндекс.Диске и логи контейнера"))
+    except Exception as e:
+        return redirect(url_for("admin_dashboard", msg=f"Ошибка запуска бэкапа: {e}", err="1"))
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
