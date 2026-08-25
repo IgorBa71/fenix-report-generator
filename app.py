@@ -30,6 +30,7 @@ import json
 import os
 import re
 import smtplib
+import subprocess
 import uuid
 from datetime import datetime
 from email.mime.application import MIMEApplication
@@ -1493,6 +1494,85 @@ def check_stuck_orders():
         _save_order(order_id, orders[order_id])
 
 
+YANDEX_DISK_TOKEN = os.environ.get("YANDEX_DISK_TOKEN", "")
+YANDEX_DISK_BACKUP_FOLDER = "/Бэкапы_БД_Феникс"  # видно сразу в корне Диска
+
+
+def _yadisk_ensure_folder():
+    """Создаёт папку для бэкапов на Яндекс.Диске, если её ещё нет.
+    409 (уже существует) — ожидаемый и штатный исход, не ошибка."""
+    resp = requests.put(
+        "https://cloud-api.yandex.net/v1/disk/resources",
+        params={"path": YANDEX_DISK_BACKUP_FOLDER},
+        headers={"Authorization": f"OAuth {YANDEX_DISK_TOKEN}"},
+        timeout=30,
+    )
+    if resp.status_code not in (201, 409):
+        raise RuntimeError(f"не удалось создать папку на Диске: {resp.status_code} {resp.text[:300]}")
+
+
+def _yadisk_upload(filename: str, content: bytes):
+    """Загружает файл на Яндекс.Диск в папку YANDEX_DISK_BACKUP_FOLDER.
+    Двухшаговый протокол API Диска: сначала запрашиваем одноразовую ссылку
+    для загрузки (GET .../upload), затем PUT самих байт на эту ссылку
+    (её нужно использовать в течение ~30 минут)."""
+    disk_path = f"{YANDEX_DISK_BACKUP_FOLDER}/{filename}"
+    resp = requests.get(
+        "https://cloud-api.yandex.net/v1/disk/resources/upload",
+        params={"path": disk_path, "overwrite": "true"},
+        headers={"Authorization": f"OAuth {YANDEX_DISK_TOKEN}"},
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"не удалось получить ссылку для загрузки: {resp.status_code} {resp.text[:300]}")
+    upload_href = resp.json()["href"]
+
+    put_resp = requests.put(upload_href, data=content, timeout=120)
+    if put_resp.status_code not in (201, 202):
+        raise RuntimeError(f"не удалось загрузить файл на Диск: {put_resp.status_code} {put_resp.text[:300]}")
+
+
+def backup_database():
+    """Ежедневный бэкап БД: pg_dump -> gzip -> загрузка на Яндекс.Диск
+    (папка YANDEX_DISK_BACKUP_FOLDER в корне Диска).
+
+    26.08.2026, переезд на Dockhost: в отличие от Timeweb (managed PostgreSQL
+    с бэкапами на стороне платформы), на Dockhost PostgreSQL — обычный
+    Docker-контейнер с подключённым сетевым диском, бэкапы целиком на нашей
+    ответственности. Специально не пишем дамп на тот же/соседний сетевой
+    диск, где лежит сама БД — если откажет диск или контейнер, бэкап должен
+    пережить это. Яндекс.Диск выбран по прямому пожеланию Игоря (не email) —
+    удобнее находить и открывать файлы бэкапов напрямую в привычном
+    хранилище. Ротация старых бэкапов (хранить последние 7) — TODO,
+    пока не реализована, файлы копятся; вернуться к этому отдельным шагом."""
+    if not DATABASE_URL:
+        print("DEBUG backup_database: DATABASE_URL не задана, бэкап пропущен", flush=True)
+        return
+    if not YANDEX_DISK_TOKEN:
+        print("DEBUG backup_database: YANDEX_DISK_TOKEN не задан, бэкап пропущен", flush=True)
+        return
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    try:
+        dump = subprocess.run(
+            ["pg_dump", DATABASE_URL, "--format=plain", "--no-owner", "--no-privileges"],
+            capture_output=True, check=True, timeout=300,
+        )
+        compressed = gzip.compress(dump.stdout)
+        filename = f"fenix_orders_backup_{date_str}.sql.gz"
+
+        _yadisk_ensure_folder()
+        _yadisk_upload(filename, compressed)
+
+        print(f"DEBUG backup_database: бэкап загружен на Яндекс.Диск, размер {len(compressed)} байт", flush=True)
+    except subprocess.CalledProcessError as e:
+        err = (e.stderr or b"")[:500]
+        print(f"DEBUG backup_database: pg_dump завершился с ошибкой: {err}", flush=True)
+        send_max_alert(f"🔴 Бэкап БД за {date_str} НЕ создан — pg_dump упал с ошибкой.\nПроверь вручную.")
+    except Exception as e:
+        print(f"DEBUG backup_database: не удалось выполнить/загрузить бэкап: {e}", flush=True)
+        send_max_alert(f"🔴 Бэкап БД за {date_str} НЕ создан/НЕ загружен на Диск.\nПричина: {e}\nПроверь вручную.")
+
+
 @app.route("/resend-report/<order_id>", methods=["POST"])
 def resend_report(order_id):
     """Замена Сценария 3 Make.com ("Ручная переотправка PDF клиенту").
@@ -1555,6 +1635,9 @@ try:
     _scheduler = BackgroundScheduler(timezone="UTC")
     _scheduler.add_job(send_delayed_report_to_clients, "interval", hours=1, id="send_delayed_report")
     _scheduler.add_job(check_stuck_orders, "interval", hours=1, id="check_stuck_orders")
+    # 26.08.2026: ежедневный бэкап БД (Dockhost — без managed PostgreSQL).
+    # 07:00 по Москве = 04:00 UTC (планировщик работает в UTC, см. выше).
+    _scheduler.add_job(backup_database, "cron", hour=4, minute=0, id="backup_database")
     _scheduler.start()
     print("DEBUG: планировщик отложенной отправки клиентам запущен (раз в час)", flush=True)
 except Exception as e:
