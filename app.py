@@ -847,7 +847,25 @@ def _get_pool() -> ConnectionPool:
         # min_size/max_size невелики намеренно — конфигурация Timeweb сейчас
         # 1 CPU / 1 ГБ RAM, лишние простаивающие соединения к БД тоже
         # расходуют память. Если позже поднимете тариф — можно увеличить.
-        _db_pool = ConnectionPool(DATABASE_URL, min_size=1, max_size=4, open=True)
+        # 25.08.2026: ИСПРАВЛЕНИЕ БАГА, обнаруженного в проде в тот же день,
+        # что и внедрён пул. PostgreSQL на Timeweb сам закрывает соединения
+        # по простою ("idle-session timeout"), а пул без проверки живости
+        # выдавал уже закрытое сервером соединение — из-за чего
+        # /create-payment-link падал с ошибкой "terminating connection due
+        # to idle-session timeout" (400 Bad Request) у реальных клиентов.
+        # check=ConnectionPool.check_connection проверяет соединение перед
+        # выдачей и прозрачно заменяет его новым, если оно уже нежизнеспособно.
+        # max_idle — секунды простоя, после которых пул сам закрывает и
+        # пересоздаёт соединение ПРЕЖДЕ, чем это сделает сервер БД (взято
+        # заведомо меньше типичного серверного idle-timeout).
+        _db_pool = ConnectionPool(
+            DATABASE_URL,
+            min_size=1,
+            max_size=4,
+            max_idle=120,
+            check=ConnectionPool.check_connection,
+            open=True,
+        )
     return _db_pool
 
 
