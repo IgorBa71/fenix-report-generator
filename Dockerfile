@@ -5,11 +5,14 @@ WORKDIR /code
 # Системные зависимости: build-essential и libpq-dev нужны для сборки
 # psycopg (даже несмотря на [binary]-вариант, некоторые окружения всё
 # равно требуют заголовки libpq на этапе установки); curl — для
-# возможных проверок доступности внутри контейнера.
+# возможных проверок доступности внутри контейнера; postgresql-client —
+# даёт утилиту pg_dump для ежедневного бэкапа БД (26.08.2026, Dockhost —
+# без managed PostgreSQL, бэкапы делаем сами из кода приложения).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     build-essential \
     libpq-dev \
+    postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /code
