@@ -356,7 +356,9 @@ def build_slide_priority_chain(pres, data):
     # пункты левой колонки ("Вызов 1, 7" и т.п., см. kseCaptions в
     # pptx_data_export.py). Заметно мельче названия, чтобы не спорить с ним
     # за внимание, но всегда читаема (не меньше 7pt).
-    caption_font = max(7.0, kse_font - 4)
+    # 26.08.2026: правка Игоря по итогам реального теста — подпись выходила
+    # за нижнюю границу плашки. Уменьшен шрифт подписи на 1pt.
+    caption_font = max(7.0, kse_font - 4) - 1
     kse_captions = ec.get("kseCaptions") or {}
 
     ry = top_y
@@ -365,33 +367,25 @@ def build_slide_priority_chain(pres, data):
         add_rounded_rect(slide, right_x, ry, right_w, kse_h, fill_color=NAVY)
         caption = kse_captions.get(name, "")
         if caption:
-            # 23.08.2026 (третий заход): подпись должна остаться на том же
-            # месте, что и в первой версии (top-anchored расчёт ниже) —
-            # меняем ТОЛЬКО позицию названия, не трогая caption_box_y. Раньше
-            # (второй заход) обе позиции считались от одной точки mid_y, и
-            # сдвиг названия вверх автоматически утащил подпись вниз вместе
-            # с ним — Игорь справедливо указал, что менять нужно было только
-            # один элемент.
+            # 26.08.2026 (пятый заход): предыдущая версия отсчитывала отступ
+            # от ЗАРЕЗЕРВИРОВАННОЙ высоты блока названия (title_h — до 42%
+            # высоты плашки, с запасом на случай двухстрочных названий), а
+            # не от реальной высоты одной строки текста — из-за этого между
+            # видимым текстом названия и подписью оставался большой пустой
+            # промежуток. Теперь отступ считается от РЕАЛЬНОЙ высоты строки
+            # шрифта названия (kse_font), а не от зарезервированного блока —
+            # подпись стоит вплотную к названию независимо от того, сколько
+            # свободного места оставлено в title_h про запас.
             pad_top = Inches(0.05)
-            gap_mid = Inches(0.05)
             title_h = max(Inches(0.28), kse_h * 0.42)
-            # 24.08.2026: подпись поднята на 3pt по правке Игоря (была
-            # ry + pad_top + title_h + gap_mid без сдвига).
-            caption_box_y = ry + pad_top + title_h + gap_mid - Pt(3)
+            title_line_h = Pt(kse_font * 1.2)
+
+            title_box_y = ry + pad_top
+            caption_box_y = title_box_y + title_line_h + Pt(0.1)
             caption_h = (ry + kse_h - Inches(0.04)) - caption_box_y
 
-            # Название — визуально центрировано по плашке. Было смещение
-            # на 2pt выше середины, 24.08.2026 добавлен ещё 1pt по правке
-            # Игоря (итого 3pt выше середины). Эта позиция по-прежнему НЕ
-            # влияет на caption_box_y выше.
-            mid_y = kse_h // 2 - Pt(3)
-            title_box_y = ry + mid_y - title_h // 2
-
-            # 24.08.2026: межстрочный интервал в подписи уменьшен на 2pt.
-            # Раньше задавался относительным множителем (line_spacing=0.95),
-            # что не позволяет вычесть фиксированные pt — переведено в
-            # явное значение в пунктах (примерная высота строки при 0.95)
-            # минус 2pt.
+            # Межстрочный интервал В ПОДПИСИ — без изменений (правка Игоря
+            # №4: "не меняй расстояние между строками текстового блока").
             # 26.08.2026: ИСПРАВЛЕНО — Pt(x) - Pt(y) в python-pptx теряет тип
             # Length (превращается в обычное int), из-за чего строка ниже
             # падала с ошибкой "value must be in range 0.0 to 132.0
@@ -401,7 +395,7 @@ def build_slide_priority_chain(pres, data):
 
             add_textbox(slide, name, right_x + Inches(0.15), title_box_y, right_w - Inches(0.3), title_h,
                         size=kse_font, color=GOLD, bold=True, align=PP_ALIGN.CENTER,
-                        anchor=MSO_ANCHOR.MIDDLE, line_spacing=0.95)
+                        anchor=MSO_ANCHOR.TOP, line_spacing=0.95)
             add_textbox(slide, caption, right_x + Inches(0.15), caption_box_y, right_w - Inches(0.3), caption_h,
                         size=caption_font, color=RGBColor(0xB9, 0xAF, 0xA5), align=PP_ALIGN.CENTER,
                         anchor=MSO_ANCHOR.TOP, line_spacing=caption_line_spacing)
