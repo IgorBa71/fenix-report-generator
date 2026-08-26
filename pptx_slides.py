@@ -392,7 +392,12 @@ def build_slide_priority_chain(pres, data):
             # что не позволяет вычесть фиксированные pt — переведено в
             # явное значение в пунктах (примерная высота строки при 0.95)
             # минус 2pt.
-            caption_line_spacing = Pt(caption_font * 1.2 * 0.95) - Pt(2)
+            # 26.08.2026: ИСПРАВЛЕНО — Pt(x) - Pt(y) в python-pptx теряет тип
+            # Length (превращается в обычное int), из-за чего строка ниже
+            # падала с ошибкой "value must be in range 0.0 to 132.0
+            # inclusive". Считаем всё сначала в обычных числах (пункты),
+            # оборачиваем в Pt() один раз в самом конце.
+            caption_line_spacing = Pt(caption_font * 1.2 * 0.95 - 2)
 
             add_textbox(slide, name, right_x + Inches(0.15), title_box_y, right_w - Inches(0.3), title_h,
                         size=kse_font, color=GOLD, bold=True, align=PP_ALIGN.CENTER,

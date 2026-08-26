@@ -13,7 +13,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libpq-dev \
     postgresql-client \
+    ca-certificates \
+    && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# 26.08.2026: библиотека requests по умолчанию проверяет HTTPS-сертификаты
+# через свой собственный набор (пакет certifi), а не через системное
+# хранилище ОС. Обнаружено на реальном тесте: сервер MAX API
+# (platform-api2.max.ru) не полностью присылает цепочку сертификатов —
+# certifi это ловит как ошибку, а более полное системное хранилище ОС
+# (используется, например, отправкой email через smtplib) — нет. Эта
+# переменная заставляет requests использовать системное хранилище вместо
+# своего собственного, для ВСЕХ вызовов requests в приложении (Метрика,
+# Яндекс.Диск, MAX) — универсальное решение, а не патч под один сервис.
+ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 
 COPY requirements.txt /code
 RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
