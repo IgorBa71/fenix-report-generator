@@ -892,6 +892,56 @@ def _init_orders_table():
         conn.commit()
 
 
+def _init_settings_table():
+    """27.08.2026: универсальная таблица настроек приложения (key/value) —
+    заведена как надёжный запасной источник для значений, которые обычно
+    приходят из переменных окружения Dockhost, но на практике оказались
+    ненадёжными: несколько раз подряд YANDEX_DISK_TOKEN "терялся" из
+    переменных окружения контейнера после автосборки из репозитория
+    (см. handoff-документы за 26.08.2026), несмотря на то что в форме
+    редактирования контейнера значение стояло верно. Причина на стороне
+    Dockhost не установлена окончательно (свежая пересборка триггерится
+    автоматически, "Автообновление: Вкл", и не всегда видно, что она
+    произошла) — вместо того чтобы полагаться на ручное нажатие
+    "Применить" после каждой пересборки, критичные для фоновых задач
+    значения теперь имеют резервную копию в БД, которая от пересборок
+    контейнера никак не зависит."""
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TIMESTAMPTZ DEFAULT now()
+                )
+                """
+            )
+        conn.commit()
+
+
+def _get_setting(key, default=None):
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT value FROM app_settings WHERE key = %s", (key,))
+            row = cur.fetchone()
+    return row[0] if row else default
+
+
+def _set_setting(key, value):
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO app_settings (key, value, updated_at)
+                VALUES (%s, %s, now())
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+                """,
+                (key, value),
+            )
+        conn.commit()
+
+
 def _load_orders():
     with _get_db_connection() as conn:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -988,9 +1038,9 @@ def _find_orders_by_email(email):
 if DATABASE_URL:
     try:
         _init_orders_table()
+        _init_settings_table()
     except Exception as _e:
-        print(f"DEBUG: не удалось инициализировать таблицу orders при старте: {_e}", flush=True)
-
+        print(f"DEBUG: не удалось инициализировать таблицы при старте: {_e}", flush=True)
 
 def get_diagnostic_price(stage_id):
     """Та же логика цены, что и в Опроснике (getDiagnosticPrice в JS) —
@@ -1494,17 +1544,57 @@ def check_stuck_orders():
         _save_order(order_id, orders[order_id])
 
 
-YANDEX_DISK_TOKEN = os.environ.get("YANDEX_DISK_TOKEN", "")
+YANDEX_DISK_TOKEN_SETTING_KEY = "yandex_disk_token"
 YANDEX_DISK_BACKUP_FOLDER = "/Бэкапы_БД_Феникс"  # видно сразу в корне Диска
+
+
+def get_yandex_disk_token() -> str:
+    """27.08.2026: токен Яндекс.Диска теперь читается динамически, а не
+    один раз при старте — с резервным источником в БД (см. комментарий
+    к _init_settings_table()). Логика:
+    1. Если переменная окружения YANDEX_DISK_TOKEN задана — используем ЕЁ
+       (переменная окружения остаётся источником истины, когда она на
+       месте) и заодно сохраняем это же значение в БД, чтобы запасная
+       копия всегда была актуальной на случай, если переменная пропадёт
+       после следующей пересборки контейнера.
+    2. Если переменной окружения нет/пусто — берём последнее известное
+       рабочее значение из БД. Так фоновый ежедневный бэкап не падает
+       молча из-за особенностей пересборки контейнера на Dockhost."""
+    env_value = os.environ.get("YANDEX_DISK_TOKEN", "")
+    if env_value:
+        try:
+            _set_setting(YANDEX_DISK_TOKEN_SETTING_KEY, env_value)
+        except Exception as e:
+            print(f"DEBUG get_yandex_disk_token: не удалось сохранить резервную копию токена в БД: {e}", flush=True)
+        return env_value
+    try:
+        db_value = _get_setting(YANDEX_DISK_TOKEN_SETTING_KEY, "")
+    except Exception as e:
+        print(f"DEBUG get_yandex_disk_token: не удалось прочитать резервную копию токена из БД: {e}", flush=True)
+        db_value = ""
+    return db_value
+
+
+# 27.08.2026: синхронизируем резервную копию токена в БД сразу при старте
+# приложения, а не только в момент бэкапа — так резервная копия остаётся
+# свежей, даже если переменная окружения слетит ДО того, как отработает
+# следующий плановый бэкап (например, через несколько часов после
+# пересборки контейнера, а не только "на следующее утро в 07:00").
+if DATABASE_URL:
+    try:
+        get_yandex_disk_token()
+    except Exception as _e:
+        print(f"DEBUG: не удалось синхронизировать резервную копию YANDEX_DISK_TOKEN при старте: {_e}", flush=True)
 
 
 def _yadisk_ensure_folder():
     """Создаёт папку для бэкапов на Яндекс.Диске, если её ещё нет.
     409 (уже существует) — ожидаемый и штатный исход, не ошибка."""
+    token = get_yandex_disk_token()
     resp = requests.put(
         "https://cloud-api.yandex.net/v1/disk/resources",
         params={"path": YANDEX_DISK_BACKUP_FOLDER},
-        headers={"Authorization": f"OAuth {YANDEX_DISK_TOKEN}"},
+        headers={"Authorization": f"OAuth {token}"},
         timeout=30,
     )
     if resp.status_code not in (201, 409):
@@ -1516,11 +1606,12 @@ def _yadisk_upload(filename: str, content: bytes):
     Двухшаговый протокол API Диска: сначала запрашиваем одноразовую ссылку
     для загрузки (GET .../upload), затем PUT самих байт на эту ссылку
     (её нужно использовать в течение ~30 минут)."""
+    token = get_yandex_disk_token()
     disk_path = f"{YANDEX_DISK_BACKUP_FOLDER}/{filename}"
     resp = requests.get(
         "https://cloud-api.yandex.net/v1/disk/resources/upload",
         params={"path": disk_path, "overwrite": "true"},
-        headers={"Authorization": f"OAuth {YANDEX_DISK_TOKEN}"},
+        headers={"Authorization": f"OAuth {token}"},
         timeout=30,
     )
     if resp.status_code != 200:
@@ -1543,8 +1634,11 @@ def _run_backup_database() -> int:
     Возвращает размер загруженного сжатого файла в байтах."""
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL не задана в переменных окружения")
-    if not YANDEX_DISK_TOKEN:
-        raise RuntimeError("YANDEX_DISK_TOKEN не задан в переменных окружения")
+    if not get_yandex_disk_token():
+        raise RuntimeError(
+            "YANDEX_DISK_TOKEN не задан ни в переменных окружения, ни в резервной "
+            "копии в БД (app_settings). Установите через POST /admin/settings/yandex-disk-token."
+        )
 
     date_str = datetime.now().strftime("%Y-%m-%d_%H%M%S")
     dump = subprocess.run(
@@ -1565,8 +1659,25 @@ def _run_backup_database() -> int:
 
 def backup_database():
     """Обёртка для планировщика (job раз в сутки, см. ниже) — вызывает
-    _run_backup_database(), при ошибке шлёт алерт в MAX вместо падения
-    всего процесса.
+    _run_backup_database(). НЕ шлёт алерт в MAX немедленно при ошибке —
+    результат (успех/ошибка) только записывается в БД (app_settings), а
+    решение "бить тревогу или нет" принимает отдельная задача
+    backup_alert_check() 10 минут спустя. Так сделано осознанно.
+
+    27.08.2026: два дня подряд по утрам приходил ложный алерт "БД НЕ
+    создан/НЕ загружен... YANDEX_DISK_TOKEN не задан" ровно в момент
+    планового запуска (07:00 МСК), хотя реальный бэкап уже через минуту
+    (07:01) успешно загружался на Диск — без единого перезапуска или
+    пересборки контейнера между этими двумя моментами (проверено по
+    логам обоих дней). Точная причина этой минутной гонки состояний не
+    установлена (возможные версии обсуждались с Игорем 27.08.2026, ни
+    одна не подтверждена окончательно логами), но сам факт воспроизвёлся
+    дважды с идентичным сценарием "ошибка → успех через 1 минуту". Вместо
+    того чтобы продолжать гадать, по предложению Игоря добавлена
+    десятиминутная отсрочка перед тревогой: реальный алерт в MAX теперь
+    уходит только если бэкапа ЗА СЕГОДНЯ всё ещё нет к 07:10 МСК — то
+    есть только при настоящей, устойчивой проблеме, а не при
+    самоустраняющейся гонке в первую минуту после планового времени.
 
     26.08.2026, переезд на Dockhost: в отличие от Timeweb (managed
     PostgreSQL с бэкапами на стороне платформы), на Dockhost PostgreSQL —
@@ -1578,13 +1689,32 @@ def backup_database():
     напрямую в привычном хранилище. Ротация старых бэкапов (хранить
     последние 7) — TODO, пока не реализована, файлы копятся; вернуться
     к этому отдельным шагом."""
+    date_str = datetime.now().strftime("%Y-%m-%d")
     try:
         size = _run_backup_database()
         print(f"DEBUG backup_database: бэкап загружен на Яндекс.Диск, размер {size} байт", flush=True)
+        _set_setting("last_backup_success_date", date_str)
+        _set_setting("last_backup_failure_reason", "")
     except Exception as e:
-        date_str = datetime.now().strftime("%Y-%m-%d")
         print(f"DEBUG backup_database: не удалось выполнить/загрузить бэкап: {e}", flush=True)
-        send_max_alert(f"🔴 Бэкап БД за {date_str} НЕ создан/НЕ загружен на Диск.\nПричина: {e}\nПроверь вручную.")
+        _set_setting("last_backup_failure_reason", f"{date_str}: {e}")
+
+
+def backup_alert_check():
+    """27.08.2026: отдельная задача, запускается через 10 минут после
+    backup_database() (см. регистрацию в планировщике ниже). Шлёт алерт
+    в MAX, только если успешного бэкапа ЗА СЕГОДНЯ всё ещё нет — то есть
+    даёт время самоустраниться минутным гонкам состояний (см. подробное
+    объяснение в docstring backup_database() выше), но не пропускает
+    настоящие устойчивые сбои."""
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    last_success = _get_setting("last_backup_success_date", "")
+    if last_success == date_str:
+        print(f"DEBUG backup_alert_check: бэкап за {date_str} подтверждён успешным, тревога не нужна", flush=True)
+        return
+    reason = _get_setting("last_backup_failure_reason", "") or "точная причина не записана (возможно, задача вообще не запустилась)"
+    print(f"DEBUG backup_alert_check: бэкап за {date_str} НЕ подтверждён спустя 10 минут, отправляю алерт", flush=True)
+    send_max_alert(f"🔴 Бэкап БД за {date_str} НЕ создан/НЕ загружен на Диск (проверено спустя 10 минут после планового времени).\nПричина: {reason}\nПроверь вручную.")
 
 
 
@@ -1654,6 +1784,11 @@ try:
     # 26.08.2026: ежедневный бэкап БД (Dockhost — без managed PostgreSQL).
     # 07:00 по Москве = 04:00 UTC (планировщик работает в UTC, см. выше).
     _scheduler.add_job(backup_database, "cron", hour=4, minute=0, id="backup_database")
+    # 27.08.2026: проверка результата бэкапа с отсрочкой 10 минут (04:10
+    # UTC = 07:10 МСК) — см. подробное объяснение в docstring
+    # backup_database() выше. Шлёт алерт в MAX, только если к этому
+    # моменту успешный бэкап за сегодня всё ещё не подтверждён.
+    _scheduler.add_job(backup_alert_check, "cron", hour=4, minute=10, id="backup_alert_check")
     _scheduler.start()
     print("DEBUG: планировщик отложенной отправки клиентам запущен (раз в час)", flush=True)
 except Exception as e:
@@ -1875,6 +2010,32 @@ def admin_backup_now():
         return redirect(url_for("admin_dashboard", msg=f"Бэкап загружен на Яндекс.Диск, размер {size} байт"))
     except Exception as e:
         return redirect(url_for("admin_dashboard", msg=f"Ошибка бэкапа: {e}", err="1"))
+
+
+@app.route("/admin/settings/yandex-disk-token", methods=["POST"])
+@admin_required
+def admin_set_yandex_disk_token():
+    """27.08.2026: позволяет обновить резервную копию YANDEX_DISK_TOKEN
+    напрямую в БД (app_settings), в обход панели Dockhost — на случай,
+    если переменная окружения контейнера снова "потеряется" после
+    пересборки. Так резервный токен можно поправить сразу через браузер,
+    без похода в Dockhost и без пересборки контейнера.
+
+    Вызов из консоли браузера (залогинившись в /admin в этой же вкладке):
+    fetch('/admin/settings/yandex-disk-token', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: 'token=' + encodeURIComponent('НОВЫЙ_ТОКЕН')
+    }).then(r => console.log(r.status, r.url))
+    """
+    token = (request.form.get("token") or "").strip()
+    if not token:
+        return redirect(url_for("admin_dashboard", msg="Не передан токен (параметр token пуст)", err="1"))
+    try:
+        _set_setting(YANDEX_DISK_TOKEN_SETTING_KEY, token)
+        return redirect(url_for("admin_dashboard", msg="Резервная копия YANDEX_DISK_TOKEN в БД обновлена"))
+    except Exception as e:
+        return redirect(url_for("admin_dashboard", msg=f"Ошибка сохранения токена в БД: {e}", err="1"))
 
 
 if __name__ == "__main__":
