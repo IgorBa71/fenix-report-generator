@@ -1623,10 +1623,74 @@ def _yadisk_upload(filename: str, content: bytes):
         raise RuntimeError(f"не удалось загрузить файл на Диск: {put_resp.status_code} {put_resp.text[:300]}")
 
 
+def _yadisk_list_backup_files() -> list:
+    """27.08.2026: возвращает список имён файлов бэкапов в папке
+    YANDEX_DISK_BACKUP_FOLDER, отсортированный по имени. Имена файлов
+    формата fenix_orders_backup_ГГГГ-ММ-ДД_ЧЧММСС.sql.gz — сортировка по
+    строке одновременно является и сортировкой по дате/времени создания
+    (ISO-подобный формат), поэтому отдельно парсить дату не нужно."""
+    token = get_yandex_disk_token()
+    resp = requests.get(
+        "https://cloud-api.yandex.net/v1/disk/resources",
+        params={"path": YANDEX_DISK_BACKUP_FOLDER, "limit": 200, "fields": "_embedded.items.name"},
+        headers={"Authorization": f"OAuth {token}"},
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"не удалось получить список файлов бэкапов: {resp.status_code} {resp.text[:300]}")
+    items = resp.json().get("_embedded", {}).get("items", [])
+    names = sorted(item["name"] for item in items if item.get("name", "").startswith("fenix_orders_backup_"))
+    return names
+
+
+def _yadisk_delete_file(filename: str):
+    """27.08.2026: удаляет файл бэкапа с Яндекс.Диска НАВСЕГДА (минуя
+    Корзину, permanently=true) — иначе старые файлы продолжали бы занимать
+    место в Корзине и ротация не решала бы задачу освобождения места."""
+    token = get_yandex_disk_token()
+    disk_path = f"{YANDEX_DISK_BACKUP_FOLDER}/{filename}"
+    resp = requests.delete(
+        "https://cloud-api.yandex.net/v1/disk/resources",
+        params={"path": disk_path, "permanently": "true"},
+        headers={"Authorization": f"OAuth {token}"},
+        timeout=30,
+    )
+    # 202 — удаление поставлено в очередь (асинхронно для больших файлов),
+    # 204 — удалено сразу. Оба варианта — успех.
+    if resp.status_code not in (202, 204):
+        raise RuntimeError(f"не удалось удалить файл {filename}: {resp.status_code} {resp.text[:300]}")
+
+
+def rotate_backups(keep: int = 7) -> int:
+    """27.08.2026: ротация бэкапов на Яндекс.Диске — оставляет последние
+    `keep` файлов (по умолчанию 7), более старые удаляет НАВСЕГДА. Не
+    бросает исключение при ошибке — ротация не должна "ронять" сам факт
+    успешного бэкапа, только логирует проблему для последующего просмотра.
+    Возвращает количество удалённых файлов."""
+    try:
+        names = _yadisk_list_backup_files()
+    except Exception as e:
+        print(f"DEBUG rotate_backups: не удалось получить список файлов, ротация пропущена: {e}", flush=True)
+        return 0
+    if len(names) <= keep:
+        return 0
+    to_delete = names[:-keep]  # все, кроме последних `keep` (список отсортирован по возрастанию)
+    deleted = 0
+    for name in to_delete:
+        try:
+            _yadisk_delete_file(name)
+            deleted += 1
+            print(f"DEBUG rotate_backups: удалён старый бэкап {name}", flush=True)
+        except Exception as e:
+            print(f"DEBUG rotate_backups: не удалось удалить {name}: {e}", flush=True)
+    return deleted
+
+
 def _run_backup_database() -> int:
-    """«Ядро» бэкапа: pg_dump -> gzip -> загрузка на Яндекс.Диск. В отличие
-    от backup_database() ничего не ловит и не глушит — при любой проблеме
-    выбрасывает исключение с понятным текстом. Так и планировщик (через
+    """«Ядро» бэкапа: pg_dump -> gzip -> загрузка на Яндекс.Диск -> ротация
+    старых файлов (оставляем последние 7). В отличие от backup_database()
+    ничего не ловит и не глушит — при любой проблеме выбрасывает
+    исключение с понятным текстом. Так и планировщик (через
     backup_database), и ручной вызов из /admin/backup-now (напрямую) могут
     сами решить, что делать с результатом — планировщик тихо алертит в MAX,
     а ручной вызов сразу показывает Игорю настоящую причину сбоя, а не
@@ -1653,6 +1717,12 @@ def _run_backup_database() -> int:
 
     _yadisk_ensure_folder()
     _yadisk_upload(filename, compressed)
+
+    # 27.08.2026: ротация — намеренно ПОСЛЕ успешной загрузки нового
+    # файла, и намеренно НЕ внутри try/except, который мог бы уронить весь
+    # бэкап целиком. rotate_backups() сама не бросает исключений (см. её
+    # docstring), поэтому её сбой никогда не повлияет на статус бэкапа.
+    rotate_backups(keep=7)
 
     return len(compressed)
 
@@ -1687,8 +1757,9 @@ def backup_database():
     бэкап должен пережить это. Яндекс.Диск выбран по прямому пожеланию
     Игоря (не email) — удобнее находить и открывать файлы бэкапов
     напрямую в привычном хранилище. Ротация старых бэкапов (хранить
-    последние 7) — TODO, пока не реализована, файлы копятся; вернуться
-    к этому отдельным шагом."""
+    последние 7) реализована 27.08.2026 — см. rotate_backups(), вызывается
+    автоматически из _run_backup_database() после каждой успешной
+    загрузки."""
     date_str = datetime.now().strftime("%Y-%m-%d")
     try:
         size = _run_backup_database()
