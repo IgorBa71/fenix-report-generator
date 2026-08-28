@@ -2130,6 +2130,9 @@ form.inline{{display:inline}}</style></head><body>
 {message_html}
 {results_html}
 <p style="margin-top:20px"><a href="/admin/quiz-leads">→ Лиды Квиза (бесплатная диагностика)</a></p>
+<form method="post" action="/admin/run-analytics-views" style="margin-top:20px">
+<button type="submit" style="background:#2a6">Пересоздать SQL VIEW для аналитики (DataLens)</button>
+</form>
 <form method="post" action="/admin/logout" style="margin-top:30px">
 <button type="submit" style="background:#666">Выйти</button>
 </form>
@@ -2182,6 +2185,322 @@ def admin_dashboard():
     return ADMIN_DASHBOARD_PAGE.format(email_value=email, message_html=message_html, results_html=results_html)
 
 
+# ---------------------------------------------------------------------------
+# 28.08.2026: SQL VIEW для аналитики по базе клиентов (Чек-ап + Квиз) —
+# см. handoff-документы за 27-28.08.2026. Хранится прямо здесь (не отдельным
+# .sql-файлом в репозитории), чтобы не заводить лишний путь на диске внутри
+# контейнера — выполняется один раз вручную через /admin/run-analytics-views,
+# при необходимости изменить состав VIEW — правится здесь и выполняется
+# заново (CREATE OR REPLACE VIEW перезаписывает существующее определение,
+# без потери данных — сами VIEW не хранят данные, только запрос).
+# ---------------------------------------------------------------------------
+ANALYTICS_VIEWS_SQL = """
+-- ============================================================================
+-- SQL VIEW для аналитики по базе клиентов «Феникс» — Чек-ап + Квиз
+-- Дата: 28.08.2026
+--
+-- Источники:
+--   orders      — заказы Чек-апа (order_id, data JSONB, updated_at)
+--   quiz_leads  — лиды бесплатного Квиза (lead_id, phone_normalized, data JSONB, created_at)
+--
+-- Как применить: выполнить этот файл целиком в PostgreSQL (например,
+-- через psql -f analytics_views.sql, либо построчно через любой клиент,
+-- подключённый к БД fenix_orders на Dockhost). Все объекты — VIEW,
+-- ничего не меняют в существующих таблицах, безопасно выполнять повторно
+-- (CREATE OR REPLACE VIEW).
+-- ============================================================================
+
+
+-- ----------------------------------------------------------------------------
+-- 1. checkup_orders_flat — заказы Чек-апа, «распакованные» из JSONB в обычные
+--    колонки. Это базовое представление, на которое опираются почти все
+--    остальные VIEW ниже — незачем в каждом запросе заново писать data->>'...'
+-- ----------------------------------------------------------------------------
+CREATE OR REPLACE VIEW checkup_orders_flat AS
+SELECT
+    order_id,
+    updated_at,
+    (data->>'created_at')::timestamptz                 AS created_at,
+    COALESCE((data->>'paid')::boolean, false)           AS paid,
+    (data->>'paid_at')::timestamptz                     AS paid_at,
+    NULLIF(data->>'stage_id', '')::int                  AS stage_id,
+    NULLIF(data->>'price', '')::numeric                 AS price,
+    data->>'client_name'                                AS client_name,
+    data->>'client_email'                                AS client_email,
+    data->>'customer_phone'                              AS phone_normalized,
+    data->>'industry'                                    AS industry,
+    NULLIF(data->>'years_in_business', '')::int          AS years_in_business,
+    data->>'urgency'                                      AS urgency,
+    data->>'decision_maker'                               AS decision_maker,
+    data->>'maturity'                                      AS maturity,
+    data->>'utm_source'                                    AS utm_source,
+    data->>'utm_medium'                                    AS utm_medium,
+    data->>'utm_campaign'                                  AS utm_campaign,
+    data->>'utm_content'                                   AS utm_content,
+    data->>'utm_term'                                      AS utm_term,
+    data->>'yandex_client_id'                              AS yandex_client_id,
+    (data->'psychographic')                                AS psychographic,
+    (data->'section9')                                     AS section9,
+    (data->'priority_kse')                                 AS priority_kse,
+    (data->'individual_top5')                              AS individual_top5,
+    (data ? 'report_pdf_base64')                           AS report_ready
+FROM orders;
+
+
+-- ----------------------------------------------------------------------------
+-- 2. quiz_leads_flat — то же самое для лидов Квиза
+-- ----------------------------------------------------------------------------
+CREATE OR REPLACE VIEW quiz_leads_flat AS
+SELECT
+    lead_id,
+    created_at,
+    phone_normalized,
+    data->>'first_name'                                    AS first_name,
+    data->>'last_name'                                      AS last_name,
+    data->>'email'                                           AS email,
+    NULLIF(data->>'stage_id', '')::int                       AS stage_id,
+    data->>'business_type'                                    AS business_type,
+    NULLIF(data->>'red_count', '')::int                       AS red_count,
+    NULLIF(data->>'yellow_count', '')::int                    AS yellow_count,
+    data->>'maturity_label'                                    AS maturity_label,
+    NULLIF(data->>'maturity_score', '')::numeric               AS maturity_score,
+    data->>'utm_source'                                         AS utm_source,
+    data->>'utm_medium'                                          AS utm_medium,
+    data->>'utm_campaign'                                        AS utm_campaign,
+    (data->'top_elements')                                       AS top_elements
+FROM quiz_leads;
+
+
+-- ============================================================================
+-- РАЗДЕЛ 1 — МАРКЕТИНГ РСЯ
+-- ============================================================================
+
+-- 1.1 Конверсия по источникам: сколько заказов создано и сколько оплачено,
+--     в разрезе utm_source / utm_campaign / utm_content.
+CREATE OR REPLACE VIEW rsya_conversion_by_source AS
+SELECT
+    COALESCE(NULLIF(utm_source, ''), '(не указан)')    AS utm_source,
+    COALESCE(NULLIF(utm_campaign, ''), '(не указана)') AS utm_campaign,
+    COALESCE(NULLIF(utm_content, ''), '(не указан)')   AS utm_content,
+    COUNT(*)                                            AS orders_created,
+    COUNT(*) FILTER (WHERE paid)                        AS orders_paid,
+    ROUND(
+        100.0 * COUNT(*) FILTER (WHERE paid) / NULLIF(COUNT(*), 0), 1
+    )                                                    AS conversion_pct,
+    SUM(price) FILTER (WHERE paid)                       AS revenue_total
+FROM checkup_orders_flat
+GROUP BY 1, 2, 3
+ORDER BY orders_paid DESC;
+
+
+-- 1.2 CPA по источникам — цена одного оплаченного Чек-апа. Сама стоимость
+--     клика/показа рекламы в БД не хранится (это данные Яндекс.Директа,
+--     не приложения) — сюда нужно будет подставлять расход по кампании
+--     ИЗ ДИРЕКТА вручную или через отдельную интеграцию. VIEW даёт только
+--     знаменатель (количество оплат) для расчёта CPA = расход / orders_paid.
+CREATE OR REPLACE VIEW rsya_paid_orders_by_campaign AS
+SELECT
+    COALESCE(NULLIF(utm_campaign, ''), '(не указана)') AS utm_campaign,
+    COUNT(*) FILTER (WHERE paid)                        AS orders_paid,
+    SUM(price) FILTER (WHERE paid)                       AS revenue_total
+FROM checkup_orders_flat
+GROUP BY 1
+ORDER BY orders_paid DESC;
+
+
+-- ============================================================================
+-- РАЗДЕЛ 2 — ПРОДАЖИ / ВОРОНКА
+-- ============================================================================
+
+-- 2.1 Доля заказов, которые создались, но не были оплачены — по дате
+--     создания (по дням/неделям), чтобы видеть тренд и эффект правок
+--     (например, изменение текста на экране оплаты).
+CREATE OR REPLACE VIEW sales_funnel_conversion_by_day AS
+SELECT
+    DATE_TRUNC('day', created_at)::date AS order_day,
+    COUNT(*)                             AS orders_created,
+    COUNT(*) FILTER (WHERE paid)         AS orders_paid,
+    ROUND(
+        100.0 * COUNT(*) FILTER (WHERE paid) / NULLIF(COUNT(*), 0), 1
+    )                                     AS conversion_pct
+FROM checkup_orders_flat
+WHERE created_at IS NOT NULL
+GROUP BY 1
+ORDER BY 1 DESC;
+
+
+-- ============================================================================
+-- РАЗДЕЛ 3 — ПРОДУКТ / МЕТОДОЛОГИЯ
+-- ============================================================================
+
+-- 3.1 Распределение оплативших клиентов по 7 Стадиям роста
+CREATE OR REPLACE VIEW checkup_stage_distribution AS
+SELECT
+    stage_id,
+    COUNT(*) AS clients_count
+FROM checkup_orders_flat
+WHERE paid AND stage_id IS NOT NULL
+GROUP BY stage_id
+ORDER BY stage_id;
+
+
+-- 3.2 Топ недостающих КСЭ — «разворачивает» массив priority_kse (топ-5 на
+--     каждого клиента) в отдельные строки и считает, как часто каждый КСЭ
+--     оказывается в топе по всей базе. Требует данных, которые появляются
+--     только в НОВЫХ заказах (после правки от 28.08.2026) — у старых
+--     заказов priority_kse не будет, это ожидаемо.
+CREATE OR REPLACE VIEW checkup_top_kse AS
+SELECT
+    kse_item->>'kse'                          AS kse_name,
+    kse_item->>'ярус'                          AS kse_tier,
+    COUNT(*)                                    AS times_in_top5,
+    ROUND(AVG((kse_item->>'скор')::numeric), 1) AS avg_score
+FROM checkup_orders_flat,
+     LATERAL jsonb_array_elements(priority_kse) AS kse_item
+WHERE paid
+GROUP BY 1, 2
+ORDER BY times_in_top5 DESC;
+
+
+-- 3.3 Топ проблем из Раздела 9 (problem1/2/3) — сырые ответы клиентов,
+--     БЕЗ кластеризации по темам (это отдельная задача для LLM-агента,
+--     см. handoff). Здесь только «плоская» выгрузка всех трёх полей по
+--     каждому клиенту — материал для LLM-обработки или ручного просмотра.
+CREATE OR REPLACE VIEW checkup_section9_problems AS
+SELECT
+    order_id,
+    updated_at,
+    stage_id,
+    section9->>'problem1' AS problem1,
+    section9->>'problem2' AS problem2,
+    section9->>'problem3' AS problem3
+FROM checkup_orders_flat
+WHERE paid AND section9 IS NOT NULL;
+
+
+-- ============================================================================
+-- РАЗДЕЛ 4 — КРОСС-АНАЛИТИКА (структура × структура, чистый SQL)
+-- ============================================================================
+
+-- 4.1 Стадия роста × Сфера деятельности
+CREATE OR REPLACE VIEW cross_stage_by_industry AS
+SELECT
+    COALESCE(NULLIF(industry, ''), '(не указана)') AS industry,
+    stage_id,
+    COUNT(*) AS clients_count
+FROM checkup_orders_flat
+WHERE paid AND stage_id IS NOT NULL
+GROUP BY 1, 2
+ORDER BY 1, 2;
+
+
+-- 4.2 Психографика × UTM-источник — проверка гипотезы, что РСЯ приводит
+--     преимущественно «Мыслителей». psychographic хранится как объект
+--     {утверждение: ранг 1-4} — берём утверждение с рангом 1 (наивысший
+--     приоритет) как «доминирующий тип» клиента.
+CREATE OR REPLACE VIEW cross_psychographic_by_source AS
+SELECT
+    COALESCE(NULLIF(utm_source, ''), '(не указан)') AS utm_source,
+    dominant.key                                      AS dominant_statement,
+    COUNT(*)                                           AS clients_count
+FROM checkup_orders_flat,
+     LATERAL (
+         SELECT key
+         FROM jsonb_each_text(psychographic)
+         WHERE value = '1'
+         LIMIT 1
+     ) AS dominant(key)
+WHERE paid AND psychographic IS NOT NULL
+GROUP BY 1, 2
+ORDER BY 1, 3 DESC;
+
+
+-- 4.3 Срочность внедрения × конверсия в оплату
+CREATE OR REPLACE VIEW cross_urgency_conversion AS
+SELECT
+    COALESCE(NULLIF(urgency, ''), '(не указана)') AS urgency,
+    COUNT(*)                                        AS orders_created,
+    COUNT(*) FILTER (WHERE paid)                     AS orders_paid,
+    ROUND(
+        100.0 * COUNT(*) FILTER (WHERE paid) / NULLIF(COUNT(*), 0), 1
+    )                                                 AS conversion_pct
+FROM checkup_orders_flat
+GROUP BY 1
+ORDER BY orders_paid DESC;
+
+
+-- 4.4 Срочность × Стадия роста
+CREATE OR REPLACE VIEW cross_urgency_by_stage AS
+SELECT
+    stage_id,
+    COALESCE(NULLIF(urgency, ''), '(не указана)') AS urgency,
+    COUNT(*)                                        AS clients_count
+FROM checkup_orders_flat
+WHERE paid AND stage_id IS NOT NULL
+GROUP BY 1, 2
+ORDER BY 1, 3 DESC;
+
+
+-- ============================================================================
+-- РАЗДЕЛ 5 — ПЕРЕСЕЧЕНИЕ АУДИТОРИЙ КВИЗ ↔ ЧЕК-АП (по телефону, E.164)
+-- ============================================================================
+
+-- 5.1 Клиенты, прошедшие ОБА инструмента — с сопоставлением Стадии,
+--     которую показал каждый из них (проверка согласованности методологии
+--     между лёгким и полным диагностическим инструментом).
+CREATE OR REPLACE VIEW cross_quiz_checkup_overlap AS
+SELECT
+    q.phone_normalized,
+    q.created_at          AS quiz_completed_at,
+    q.stage_id             AS quiz_stage_id,
+    o.updated_at            AS checkup_updated_at,
+    o.stage_id               AS checkup_stage_id,
+    (q.stage_id = o.stage_id) AS stage_matches,
+    o.paid
+FROM quiz_leads_flat q
+JOIN checkup_orders_flat o
+  ON o.phone_normalized = q.phone_normalized
+ORDER BY q.created_at DESC;
+
+
+-- 5.2 Итоговая сводка по пересечению — сколько всего лидов Квиза, сколько
+--     из них дошли до Чек-апа, и у какой доли Стадия совпала.
+CREATE OR REPLACE VIEW cross_quiz_checkup_summary AS
+SELECT
+    (SELECT COUNT(*) FROM quiz_leads_flat)                       AS quiz_leads_total,
+    (SELECT COUNT(*) FROM cross_quiz_checkup_overlap)              AS overlap_count,
+    (SELECT COUNT(*) FROM cross_quiz_checkup_overlap WHERE paid)    AS overlap_paid_count,
+    (SELECT COUNT(*) FROM cross_quiz_checkup_overlap WHERE stage_matches) AS stage_match_count;
+
+"""
+
+
+def _run_analytics_views_sql():
+    """Выполняет ANALYTICS_VIEWS_SQL по частям (разбито по ';') — каждый
+    CREATE OR REPLACE VIEW отдельной командой, в своём соединении, чтобы
+    ошибка в одном VIEW не откатывала уже успешно созданные предыдущие.
+    Возвращает список (заголовок_команды, ok, error_or_None)."""
+    statements = [s.strip() for s in ANALYTICS_VIEWS_SQL.split(";") if s.strip()]
+    results = []
+    for stmt in statements:
+        # Короткий заголовок для отчёта — первая строка с CREATE OR REPLACE
+        # VIEW, если есть, иначе первые 60 символов команды.
+        header_line = next(
+            (line.strip() for line in stmt.splitlines()
+             if line.strip().upper().startswith("CREATE OR REPLACE VIEW")),
+            stmt.strip().splitlines()[0][:60] if stmt.strip() else "(пусто)",
+        )
+        try:
+            with _get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(stmt)
+                conn.commit()
+            results.append((header_line, True, None))
+        except Exception as e:
+            results.append((header_line, False, str(e)))
+    return results
+
+
 ADMIN_ORDERS_PAGE = """
 <!DOCTYPE html><html lang="ru"><head><meta charset="utf-8">
 <title>Заказы Чек-апа — Феникс</title>
@@ -2216,6 +2535,45 @@ def _parse_admin_limit(default=100):
     if raw.isdigit():
         return int(raw)
     return default
+
+
+ADMIN_RUN_VIEWS_RESULT_PAGE = """
+<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8">
+<title>Выполнение SQL VIEW — Феникс</title>
+<style>body{{font-family:sans-serif;max-width:900px;margin:40px auto;padding:0 16px}}
+table{{width:100%;border-collapse:collapse;margin-top:16px;font-size:14px}}
+td,th{{border:1px solid #ccc;padding:6px 8px;text-align:left;vertical-align:top}}
+th{{background:#f4f4f4}}
+.ok{{color:green}} .fail{{color:#c00}}
+a.back{{display:inline-block;margin-top:20px}}</style>
+</head><body>
+<h2>Результат выполнения SQL VIEW</h2>
+<p>Успешно: {ok_count} из {total_count}.</p>
+{rows_html}
+<a class="back" href="/admin">← Назад к панели</a>
+</body></html>
+"""
+
+
+@app.route("/admin/run-analytics-views", methods=["POST"])
+@admin_required
+def admin_run_analytics_views():
+    """28.08.2026: разовая (и повторно безопасная — CREATE OR REPLACE VIEW)
+    команда пересоздать все аналитические VIEW в БД, без необходимости
+    ставить сторонний SQL-клиент на компьютер Игоря. Кнопка — на главной
+    панели /admin."""
+    results = _run_analytics_views_sql()
+    ok_count = sum(1 for _, ok, _ in results if ok)
+
+    rows = ""
+    for header, ok, error in results:
+        status = '<span class="ok">✓ OK</span>' if ok else f'<span class="fail">✗ Ошибка: {error}</span>'
+        rows += f"<tr><td>{header}</td><td>{status}</td></tr>"
+    rows_html = f"<table><tr><th>Команда</th><th>Результат</th></tr>{rows}</table>"
+
+    return ADMIN_RUN_VIEWS_RESULT_PAGE.format(
+        ok_count=ok_count, total_count=len(results), rows_html=rows_html
+    )
 
 
 @app.route("/admin/orders", methods=["GET"])
