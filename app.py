@@ -618,6 +618,27 @@ def generate_report():
                     order["report_number"] = report_number
                     order["client_email"] = q.get("email", "")
                     order["client_name"] = q.get("name", "")
+
+                    # 28.08.2026: поля для аналитики по базе клиентов Чек-апа
+                    # (см. handoff-документы за 27-28.08.2026) — раньше эти
+                    # данные существовали только "на лету" в момент обработки
+                    # запроса (использовались для сборки PDF/PPTX и пересылки
+                    # в Make.com), в PostgreSQL не сохранялись вообще. Список
+                    # полей согласован с Игорем: то, что прямо отвечает на
+                    # приоритетные вопросы аналитики (РСЯ/продажи/продукт),
+                    # без сырых промежуточных данных, дублирующих уже готовые
+                    # агрегаты (например, section8_likert_by_kse не хранится
+                    # отдельно — он уже свёрнут в приоритизация_ксэ ниже).
+                    order["industry"] = q.get("industry", "")
+                    order["years_in_business"] = client_response["qualification"].get("years_in_business", "")
+                    order["psychographic"] = q.get("psychographic", {})
+                    order["urgency"] = q.get("urgency", "")
+                    order["decision_maker"] = q.get("decisionMaker", "")
+                    order["section9"] = client_response.get("section9", {})
+                    order["priority_kse"] = result.get("приоритизация_ксэ", [])
+                    order["individual_top5"] = result.get("поток_б", {}).get("individual_top5", [])
+                    order["maturity"] = result.get("поток_б", {}).get("maturity", "")
+
                     _save_order(order_id, order)
 
                     # 22.08.2026: мгновенное письмо-подтверждение клиенту, сразу
@@ -1032,6 +1053,28 @@ def _find_orders_by_email(email):
     return [(row["order_id"], row["data"]) for row in rows]
 
 
+def _get_recent_orders(limit=100):
+    """28.08.2026: последние N заказов Чек-апа — по аналогии с
+    _get_recent_quiz_leads(), для просмотра всей базы клиентов, а не
+    только поиска по конкретному email. limit=None — вся таблица целиком
+    (используется через /admin/orders?limit=all, для небольшой базы;
+    по мере роста базы стоит использовать конкретное число)."""
+    with _get_db_connection() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            if limit is None:
+                cur.execute(
+                    "SELECT order_id, data, updated_at FROM orders ORDER BY updated_at DESC"
+                )
+            else:
+                cur.execute(
+                    "SELECT order_id, data, updated_at "
+                    "FROM orders ORDER BY updated_at DESC LIMIT %s",
+                    (limit,),
+                )
+            rows = cur.fetchall()
+    return [(row["order_id"], row["data"], row["updated_at"]) for row in rows]
+
+
 def _init_quiz_leads_table():
     """27.08.2026 (продолжение сессии): таблица для лидов бесплатного Квиза
     («Возрождение бизнеса», отдельный от Чек-апа продукт-триггер, без
@@ -1085,18 +1128,25 @@ def _count_quiz_leads():
     return count
 
 
-def _get_recent_quiz_leads(limit=50):
+def _get_recent_quiz_leads(limit=100):
     """27.08.2026: последние N лидов Квиза для быстрой проверки в /admin —
     не полноценная админка с действиями (как у заказов Чек-апа), а просто
     возможность глазами свериться, что данные из формы корректно доходят
-    и сохраняются (особенно телефон после нормализации)."""
+    и сохраняются (особенно телефон после нормализации). limit=None — вся
+    таблица целиком (см. /admin/orders?limit=all — тот же принцип)."""
     with _get_db_connection() as conn:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute(
-                "SELECT lead_id, phone_normalized, data, created_at "
-                "FROM quiz_leads ORDER BY created_at DESC LIMIT %s",
-                (limit,),
-            )
+            if limit is None:
+                cur.execute(
+                    "SELECT lead_id, phone_normalized, data, created_at "
+                    "FROM quiz_leads ORDER BY created_at DESC"
+                )
+            else:
+                cur.execute(
+                    "SELECT lead_id, phone_normalized, data, created_at "
+                    "FROM quiz_leads ORDER BY created_at DESC LIMIT %s",
+                    (limit,),
+                )
             rows = cur.fetchall()
     return rows
 
@@ -2076,6 +2126,7 @@ form.inline{{display:inline}}</style></head><body>
 <input type="text" name="email" placeholder="email клиента" value="{email_value}">
 <button type="submit">Найти</button>
 </form>
+<p style="margin-top:8px"><a href="/admin/orders">→ Все заказы Чек-апа (последние 50)</a></p>
 {message_html}
 {results_html}
 <p style="margin-top:20px"><a href="/admin/quiz-leads">→ Лиды Квиза (бесплатная диагностика)</a></p>
@@ -2131,6 +2182,87 @@ def admin_dashboard():
     return ADMIN_DASHBOARD_PAGE.format(email_value=email, message_html=message_html, results_html=results_html)
 
 
+ADMIN_ORDERS_PAGE = """
+<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8">
+<title>Заказы Чек-апа — Феникс</title>
+<style>body{{font-family:sans-serif;max-width:1200px;margin:40px auto;padding:0 16px}}
+table{{width:100%;border-collapse:collapse;margin-top:16px;font-size:14px}}
+td,th{{border:1px solid #ccc;padding:6px 8px;text-align:left;vertical-align:top}}
+th{{background:#f4f4f4}}
+.muted{{color:#888;font-size:13px}}
+button{{padding:8px 14px;background:#D5530B;color:#fff;border:none;border-radius:4px;cursor:pointer}}
+a.back{{display:inline-block;margin-bottom:10px}}</style>
+</head><body>
+<a class="back" href="/admin">← Назад к поиску</a>
+<h2>Заказы Чек-апа</h2>
+<p class="muted">Показаны: {showing} (по updated_at). Ссылки: <a href="?limit=100">последние 100</a> · <a href="?limit=500">последние 500</a> · <a href="?limit=all">все</a>.</p>
+{rows_html}
+<form method="post" action="/admin/logout" style="margin-top:30px">
+<button type="submit" style="background:#666">Выйти</button>
+</form>
+</body></html>
+"""
+
+
+def _parse_admin_limit(default=100):
+    """28.08.2026: общий разбор ?limit=N / ?limit=all для /admin/orders и
+    /admin/quiz-leads. Возвращает целое число или None (= без ограничения,
+    вся таблица). Нераспознанное значение — тихо откатываемся к default,
+    без ошибки 400: это удобная служебная страница для Игоря, а не
+    публичный API, где строгая валидация была бы важна."""
+    raw = flask_request.args.get("limit", "").strip().lower()
+    if raw == "all":
+        return None
+    if raw.isdigit():
+        return int(raw)
+    return default
+
+
+@app.route("/admin/orders", methods=["GET"])
+@admin_required
+def admin_orders():
+    """28.08.2026: полный список заказов Чек-апа — раньше в /admin можно
+    было только искать заказ по конкретному email, не было способа увидеть
+    базу целиком. По аналогии с /admin/quiz-leads. По умолчанию — последние
+    100 (по updated_at); ?limit=500 или ?limit=all — для другого объёма."""
+    limit = _parse_admin_limit(default=100)
+    rows = _get_recent_orders(limit=limit)
+
+    if not rows:
+        rows_html = "<p>Заказов пока нет.</p>"
+    else:
+        trs = ""
+        for order_id, d, updated_at in rows:
+            d = d or {}
+            updated_str = updated_at.strftime("%d.%m.%Y %H:%M") if updated_at else "—"
+            name = d.get("client_name") or "—"
+            email = d.get("client_email") or "—"
+            phone = d.get("customer_phone") or "—"
+            paid = "Оплачен" if d.get("paid") else "Не оплачен"
+            report_ready = "Да" if d.get("report_pdf_base64") else "Нет"
+            trs += f"""
+            <tr>
+                <td>{updated_str}</td>
+                <td>{order_id}</td>
+                <td>{name}</td>
+                <td>{email}</td>
+                <td>{phone}</td>
+                <td>{d.get('stage_id', '—')}</td>
+                <td>{d.get('price', '—')}</td>
+                <td>{paid}</td>
+                <td>Отчёт: {report_ready}</td>
+                <td>{d.get('utm_source') or '—'}</td>
+            </tr>"""
+        rows_html = (
+            "<table><tr>"
+            "<th>Обновлён</th><th>order_id</th><th>Имя</th><th>Email</th><th>Телефон</th>"
+            "<th>Стадия</th><th>Цена</th><th>Оплата</th><th>Отчёт</th><th>UTM-источник</th>"
+            f"</tr>{trs}</table>"
+        )
+
+    return ADMIN_ORDERS_PAGE.format(showing=len(rows), rows_html=rows_html)
+
+
 ADMIN_QUIZ_LEADS_PAGE = """
 <!DOCTYPE html><html lang="ru"><head><meta charset="utf-8">
 <title>Лиды Квиза — Феникс</title>
@@ -2143,7 +2275,7 @@ form.inline{{display:inline}}
 button{{padding:8px 14px;background:#D5530B;color:#fff;border:none;border-radius:4px;cursor:pointer}}</style>
 </head><body>
 <h2>Лиды Квиза (бесплатная диагностика)</h2>
-<p class="muted">Всего в базе: {total_count}. Показаны последние {showing}.</p>
+<p class="muted">Всего в базе: {total_count}. Показаны: {showing}. Ссылки: <a href="?limit=100">последние 100</a> · <a href="?limit=500">последние 500</a> · <a href="?limit=all">все</a>.</p>
 {rows_html}
 <form method="post" action="/admin/logout" style="margin-top:30px">
 <button type="submit" style="background:#666">Выйти</button>
@@ -2158,8 +2290,11 @@ def admin_quiz_leads():
     """27.08.2026: быстрая проверка данных Квиза после тестового прохождения
     формы — HTML-таблица по образцу ADMIN_DASHBOARD_PAGE (заказы Чек-апа),
     но без действий (отправки писем и т.п.) — здесь только просмотр,
-    Квиз ничего клиенту дополнительно не отправляет."""
-    leads = _get_recent_quiz_leads(limit=50)
+    Квиз ничего клиенту дополнительно не отправляет. По умолчанию —
+    последние 100 (по created_at); ?limit=500 или ?limit=all — для
+    другого объёма (см. _parse_admin_limit)."""
+    limit = _parse_admin_limit(default=100)
+    leads = _get_recent_quiz_leads(limit=limit)
 
     if not leads:
         rows_html = "<p>Лидов пока нет.</p>"
