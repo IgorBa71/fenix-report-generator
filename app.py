@@ -121,6 +121,12 @@ IGOR_NOTIFICATION_EMAIL = os.environ.get("IGOR_NOTIFICATION_EMAIL", "report@feni
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 
+# 28.08.2026: LLM-агент для анализа Раздела 9 Опросника Чек-апа —
+# ключ Anthropic API нужно добавить отдельной переменной окружения
+# в контейнере на Dockhost (ANTHROPIC_API_KEY), как остальные секреты.
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
+
 # Проактивные уведомления Игорю в мессенджер MAX (бот "Феникс Алерты"),
 # на случай сбоев в отправке Отчётов (Сц1/Сц2) — см. send_max_alert() ниже.
 MAX_BOT_TOKEN = os.environ.get("MAX_BOT_TOKEN", "")
@@ -1128,6 +1134,158 @@ def _count_quiz_leads():
     return count
 
 
+# ---------------------------------------------------------------------------
+# 28.08.2026: LLM-агент — периодический (пока ручной, по кнопке) анализ
+# ответов Раздела 9 Опросника Чек-апа (problem1/2/3 и остальные текстовые
+# поля). См. handoff-документы за 27-28.08.2026 — два результата анализа:
+#   1) content_insights — темы, которые чаще всего встречаются в ответах
+#      клиентов, с дословными цитатами (материал для контента/рекламы)
+#   2) client_self_diagnosis — по каждому клиенту: совпадает ли то, что он
+#      сам считает своей проблемой, с реальным корневым КСЭ по методологии
+# Каждый прогон помечен batch_id — история хранится, не перезаписывается,
+# чтобы видеть, как меняется картина со временем.
+# ---------------------------------------------------------------------------
+
+def _init_insights_tables():
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS content_insights (
+                    id SERIAL PRIMARY KEY,
+                    batch_id TEXT NOT NULL,
+                    generated_at TIMESTAMPTZ DEFAULT now(),
+                    theme TEXT NOT NULL,
+                    frequency INT NOT NULL,
+                    quotes JSONB NOT NULL
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS client_self_diagnosis (
+                    id SERIAL PRIMARY KEY,
+                    batch_id TEXT NOT NULL,
+                    generated_at TIMESTAMPTZ DEFAULT now(),
+                    order_id TEXT NOT NULL,
+                    matches_root_cause BOOLEAN,
+                    explanation TEXT
+                )
+                """
+            )
+        conn.commit()
+
+
+def _get_orders_for_insights():
+    """Заказы с заполненным Разделом 9 — сырьё для LLM-агента."""
+    with _get_db_connection() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                SELECT order_id,
+                       data->'section9'     AS section9,
+                       data->'priority_kse' AS priority_kse,
+                       data->>'stage_id'    AS stage_id
+                FROM orders
+                WHERE COALESCE((data->>'paid')::boolean, false)
+                  AND data ? 'section9'
+                """
+            )
+            return cur.fetchall()
+
+
+def _call_anthropic_api(prompt_text):
+    """Прямой вызов Anthropic Messages API. Требует ANTHROPIC_API_KEY в
+    переменных окружения контейнера — без него функция вернёт ошибку,
+    не пытаясь запрос отправить."""
+    if not ANTHROPIC_API_KEY:
+        raise RuntimeError("ANTHROPIC_API_KEY не задан в переменных окружения")
+
+    resp = requests.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={
+            "x-api-key": ANTHROPIC_API_KEY,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        json={
+            "model": ANTHROPIC_MODEL,
+            "max_tokens": 4096,
+            "messages": [{"role": "user", "content": prompt_text}],
+        },
+        timeout=120,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return "".join(
+        block.get("text", "") for block in data.get("content", []) if block.get("type") == "text"
+    )
+
+
+def _build_insights_prompt(orders_rows):
+    """Собирает промпт для LLM: сырые ответы Раздела 9 + уже посчитанный
+    методологией топ-КСЭ по каждому клиенту, просит ответ строго в JSON."""
+    clients = []
+    for row in orders_rows:
+        clients.append({
+            "order_id": row["order_id"],
+            "stage_id": row["stage_id"],
+            "problem1": (row["section9"] or {}).get("problem1", ""),
+            "problem2": (row["section9"] or {}).get("problem2", ""),
+            "problem3": (row["section9"] or {}).get("problem3", ""),
+            "priority_kse_top3": [
+                item.get("kse") for item in (row["priority_kse"] or [])[:3]
+            ],
+        })
+
+    return f"""Ты аналитик, который работает с ответами клиентов бизнес-консалтинга
+«Лаборатория бизнес лидерства Феникс» на вопрос «3 главные проблемы/вызова».
+
+Вот список клиентов с их ответами (problem1/2/3) и топ-3 корневых недостающих
+Ключевых системных элементов бизнеса (КСЭ), которые по факту определила
+методология для каждого из них:
+
+{json.dumps(clients, ensure_ascii=False, indent=2)}
+
+Задачи:
+1. Сгруппируй все ответы problem1/2/3 по всем клиентам в 5-8 общих тем.
+   Для каждой темы укажи: название темы, частоту (сколько раз тема
+   встретилась), и 3-5 ДОСЛОВНЫХ цитат клиентов (без изменений и сокращений).
+2. Для каждого клиента отдельно оцени: совпадает ли по смыслу то, что он сам
+   считает своей проблемой (problem1/2/3), с реальным корневым КСЭ, который
+   определила методология (priority_kse_top3)? Кратко поясни вывод.
+
+Ответь СТРОГО в формате JSON, без пояснений до или после, без markdown-разметки:
+{{
+  "themes": [
+    {{"theme": "название темы", "frequency": число, "quotes": ["цитата 1", "цитата 2"]}}
+  ],
+  "self_diagnosis": [
+    {{"order_id": "...", "matches_root_cause": true, "explanation": "..."}}
+  ]
+}}"""
+
+
+def _save_insights(batch_id, themes, self_diagnosis):
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            for t in themes:
+                cur.execute(
+                    "INSERT INTO content_insights (batch_id, theme, frequency, quotes) "
+                    "VALUES (%s, %s, %s, %s)",
+                    (batch_id, t.get("theme", ""), t.get("frequency", 0),
+                     json.dumps(t.get("quotes", []), ensure_ascii=False)),
+                )
+            for d in self_diagnosis:
+                cur.execute(
+                    "INSERT INTO client_self_diagnosis (batch_id, order_id, matches_root_cause, explanation) "
+                    "VALUES (%s, %s, %s, %s)",
+                    (batch_id, d.get("order_id", ""), d.get("matches_root_cause"),
+                     d.get("explanation", "")),
+                )
+        conn.commit()
+
+
 def _get_recent_quiz_leads(limit=100):
     """27.08.2026: последние N лидов Квиза для быстрой проверки в /admin —
     не полноценная админка с действиями (как у заказов Чек-апа), а просто
@@ -1159,6 +1317,7 @@ if DATABASE_URL:
         _init_orders_table()
         _init_settings_table()
         _init_quiz_leads_table()
+        _init_insights_tables()
     except Exception as _e:
         print(f"DEBUG: не удалось инициализировать таблицы при старте: {_e}", flush=True)
 
@@ -2133,6 +2292,9 @@ form.inline{{display:inline}}</style></head><body>
 <form method="post" action="/admin/run-analytics-views" style="margin-top:20px">
 <button type="submit" style="background:#2a6">Пересоздать SQL VIEW для аналитики (DataLens)</button>
 </form>
+<form method="post" action="/admin/generate-insights" style="margin-top:12px">
+<button type="submit" style="background:#5566cc">Запустить LLM-анализ Раздела 9 (темы + цитаты)</button>
+</form>
 <form method="post" action="/admin/logout" style="margin-top:30px">
 <button type="submit" style="background:#666">Выйти</button>
 </form>
@@ -2553,6 +2715,76 @@ a.back{{display:inline-block;margin-top:20px}}</style>
 <a class="back" href="/admin">← Назад к панели</a>
 </body></html>
 """
+
+
+ADMIN_INSIGHTS_RESULT_PAGE = """
+<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8">
+<title>LLM-анализ Раздела 9 — Феникс</title>
+<style>body{{font-family:sans-serif;max-width:1000px;margin:40px auto;padding:0 16px}}
+table{{width:100%;border-collapse:collapse;margin-top:16px;font-size:14px}}
+td,th{{border:1px solid #ccc;padding:6px 8px;text-align:left;vertical-align:top}}
+th{{background:#f4f4f4}}
+.muted{{color:#888;font-size:13px}}
+.fail{{color:#c00}}
+a.back{{display:inline-block;margin-top:20px}}</style>
+</head><body>
+<h2>Результат LLM-анализа Раздела 9</h2>
+{body_html}
+<a class="back" href="/admin">← Назад к панели</a>
+</body></html>
+"""
+
+
+@app.route("/admin/generate-insights", methods=["POST"])
+@admin_required
+def admin_generate_insights():
+    """28.08.2026: LLM-агент — прогоняет накопленные ответы Раздела 9
+    (problem1/2/3 и т.д. вместе с уже посчитанным методологией топ-КСЭ)
+    через Anthropic API: кластеризует темы + дословные цитаты, и отдельно
+    оценивает, насколько самооценка клиента совпадает с реальным диагнозом.
+    Кнопка на главной панели /admin. Запускается вручную (не по расписанию) —
+    имеет смысл нажимать раз в месяц-два, по мере накопления новых заказов
+    с заполненным Разделом 9."""
+    orders_rows = _get_orders_for_insights()
+
+    if not orders_rows:
+        body_html = "<p>Нет заказов с заполненным Разделом 9 — анализировать пока нечего.</p>"
+        return ADMIN_INSIGHTS_RESULT_PAGE.format(body_html=body_html)
+
+    try:
+        prompt = _build_insights_prompt(orders_rows)
+        raw_response = _call_anthropic_api(prompt)
+        # Модель иногда оборачивает JSON в ```json ... ``` несмотря на
+        # прямую просьбу этого не делать — на всякий случай подчищаем.
+        cleaned = raw_response.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("```")[1]
+            if cleaned.startswith("json"):
+                cleaned = cleaned[4:]
+        parsed = json.loads(cleaned)
+        themes = parsed.get("themes", [])
+        self_diagnosis = parsed.get("self_diagnosis", [])
+
+        batch_id = uuid.uuid4().hex[:12]
+        _save_insights(batch_id, themes, self_diagnosis)
+
+        matches_count = sum(1 for d in self_diagnosis if d.get("matches_root_cause"))
+        themes_rows = "".join(
+            f"<tr><td>{t.get('theme','')}</td><td>{t.get('frequency',0)}</td>"
+            f"<td>{'<br>'.join(t.get('quotes', []))}</td></tr>"
+            for t in themes
+        )
+        body_html = f"""
+        <p>Проанализировано клиентов: {len(orders_rows)}. Batch: {batch_id}.</p>
+        <h3>Топ тем (Раздел 9)</h3>
+        <table><tr><th>Тема</th><th>Частота</th><th>Примеры цитат</th></tr>{themes_rows}</table>
+        <h3>Самодиагностика клиентов</h3>
+        <p>Совпадает с реальным диагнозом: {matches_count} из {len(self_diagnosis)}.</p>
+        """
+    except Exception as e:
+        body_html = f'<p class="fail">Ошибка: {e}</p>'
+
+    return ADMIN_INSIGHTS_RESULT_PAGE.format(body_html=body_html)
 
 
 @app.route("/admin/run-analytics-views", methods=["POST"])
