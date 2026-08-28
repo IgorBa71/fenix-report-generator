@@ -2078,6 +2078,7 @@ form.inline{{display:inline}}</style></head><body>
 </form>
 {message_html}
 {results_html}
+<p style="margin-top:20px"><a href="/admin/quiz-leads">→ Лиды Квиза (бесплатная диагностика)</a></p>
 <form method="post" action="/admin/logout" style="margin-top:30px">
 <button type="submit" style="background:#666">Выйти</button>
 </form>
@@ -2130,29 +2131,75 @@ def admin_dashboard():
     return ADMIN_DASHBOARD_PAGE.format(email_value=email, message_html=message_html, results_html=results_html)
 
 
+ADMIN_QUIZ_LEADS_PAGE = """
+<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8">
+<title>Лиды Квиза — Феникс</title>
+<style>body{{font-family:sans-serif;max-width:1100px;margin:40px auto;padding:0 16px}}
+table{{width:100%;border-collapse:collapse;margin-top:16px;font-size:14px}}
+td,th{{border:1px solid #ccc;padding:6px 8px;text-align:left;vertical-align:top}}
+th{{background:#f4f4f4}}
+.muted{{color:#888;font-size:13px}}
+form.inline{{display:inline}}
+button{{padding:8px 14px;background:#D5530B;color:#fff;border:none;border-radius:4px;cursor:pointer}}</style>
+</head><body>
+<h2>Лиды Квиза (бесплатная диагностика)</h2>
+<p class="muted">Всего в базе: {total_count}. Показаны последние {showing}.</p>
+{rows_html}
+<form method="post" action="/admin/logout" style="margin-top:30px">
+<button type="submit" style="background:#666">Выйти</button>
+</form>
+</body></html>
+"""
+
+
 @app.route("/admin/quiz-leads", methods=["GET"])
 @admin_required
 def admin_quiz_leads():
     """27.08.2026: быстрая проверка данных Квиза после тестового прохождения
-    формы — не полноценная HTML-страница с действиями (как у заказов
-    Чек-апа), а простой JSON-список последних лидов. Если понадобится
-    регулярно сюда заглядывать — можно позже сделать по образцу
-    ADMIN_DASHBOARD_PAGE полноценную таблицу."""
+    формы — HTML-таблица по образцу ADMIN_DASHBOARD_PAGE (заказы Чек-апа),
+    но без действий (отправки писем и т.п.) — здесь только просмотр,
+    Квиз ничего клиенту дополнительно не отправляет."""
     leads = _get_recent_quiz_leads(limit=50)
-    return jsonify({
-        "ok": True,
-        "total_count": _count_quiz_leads(),
-        "showing": len(leads),
-        "leads": [
-            {
-                "lead_id": row["lead_id"],
-                "phone_normalized": row["phone_normalized"],
-                "created_at": row["created_at"].isoformat() if row["created_at"] else None,
-                "data": row["data"],
-            }
-            for row in leads
-        ],
-    })
+
+    if not leads:
+        rows_html = "<p>Лидов пока нет.</p>"
+    else:
+        rows = ""
+        for row in leads:
+            d = row["data"] or {}
+            created = row["created_at"].strftime("%d.%m.%Y %H:%M") if row["created_at"] else "—"
+            full_name = f"{d.get('first_name', '')} {d.get('last_name', '')}".strip() or "—"
+            top_elements = d.get("top_elements") or []
+            elements_str = ", ".join(
+                e.get("name", "") for e in top_elements if isinstance(e, dict)
+            ) or "—"
+            utm_source = d.get("utm_source") or "—"
+            rows += f"""
+            <tr>
+                <td>{created}</td>
+                <td>{full_name}</td>
+                <td>{row['phone_normalized']}</td>
+                <td>{d.get('email') or '—'}</td>
+                <td>{d.get('stage_id', '—')}</td>
+                <td>{d.get('business_type', '—')}</td>
+                <td>{d.get('maturity_label', '—')} ({d.get('maturity_score', '—')})</td>
+                <td>🔴{d.get('red_count', 0)} 🟡{d.get('yellow_count', 0)}</td>
+                <td>{elements_str}</td>
+                <td>{utm_source}</td>
+            </tr>"""
+        rows_html = (
+            "<table><tr>"
+            "<th>Дата</th><th>Имя</th><th>Телефон</th><th>Email</th>"
+            "<th>Стадия</th><th>Тип</th><th>Зрелость</th><th>Вызовы</th>"
+            "<th>Топ КСЭ</th><th>UTM-источник</th>"
+            f"</tr>{rows}</table>"
+        )
+
+    return ADMIN_QUIZ_LEADS_PAGE.format(
+        total_count=_count_quiz_leads(),
+        showing=len(leads),
+        rows_html=rows_html,
+    )
 
 
 @app.route("/admin/send-client/<order_id>", methods=["POST"])
