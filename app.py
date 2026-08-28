@@ -2272,14 +2272,12 @@ td,th{{border:1px solid #ccc;padding:6px 8px;text-align:left;vertical-align:top}
 th{{background:#f4f4f4}}
 .muted{{color:#888;font-size:13px}}
 form.inline{{display:inline}}
-button{{padding:8px 14px;background:#D5530B;color:#fff;border:none;border-radius:4px;cursor:pointer}}</style>
+a.back{{display:inline-block;margin-bottom:10px}}</style>
 </head><body>
+<a class="back" href="/admin">← Назад к поиску</a>
 <h2>Лиды Квиза (бесплатная диагностика)</h2>
 <p class="muted">Всего в базе: {total_count}. Показаны: {showing}. Ссылки: <a href="?limit=100">последние 100</a> · <a href="?limit=500">последние 500</a> · <a href="?limit=all">все</a>.</p>
 {rows_html}
-<form method="post" action="/admin/logout" style="margin-top:30px">
-<button type="submit" style="background:#666">Выйти</button>
-</form>
 </body></html>
 """
 
