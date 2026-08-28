@@ -1032,6 +1032,75 @@ def _find_orders_by_email(email):
     return [(row["order_id"], row["data"]) for row in rows]
 
 
+def _init_quiz_leads_table():
+    """27.08.2026 (продолжение сессии): таблица для лидов бесплатного Квиза
+    («Возрождение бизнеса», отдельный от Чек-апа продукт-триггер, без
+    прямого технического перехода в Чек-ап — только маркетинговая связь).
+    Данные Квиза раньше нигде, кроме UniSender и Tilda CRM, не сохранялись —
+    в аналитическую БД не попадали вообще. phone_normalized — отдельная
+    проиндексированная колонка (не только внутри JSONB), чтобы кросс-
+    аналитика Квиз↔Чек-ап (JOIN по телефону, приведённому к единому виду)
+    была быстрой и не требовала разбора JSONB на каждый запрос."""
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS quiz_leads (
+                    lead_id TEXT PRIMARY KEY,
+                    phone_normalized TEXT NOT NULL,
+                    data JSONB NOT NULL,
+                    created_at TIMESTAMPTZ DEFAULT now()
+                )
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_quiz_leads_phone ON quiz_leads (phone_normalized)"
+            )
+        conn.commit()
+
+
+def _save_quiz_lead(lead_id, phone_normalized, lead_data):
+    """Точечная запись одного лида Квиза — по аналогии с _save_order()."""
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO quiz_leads (lead_id, phone_normalized, data, created_at)
+                VALUES (%s, %s, %s, now())
+                ON CONFLICT (lead_id)
+                DO UPDATE SET phone_normalized = EXCLUDED.phone_normalized,
+                              data = EXCLUDED.data
+                """,
+                (lead_id, phone_normalized, json.dumps(lead_data, ensure_ascii=False)),
+            )
+        conn.commit()
+
+
+def _count_quiz_leads():
+    """Лёгкий COUNT(*) для логов — по аналогии с _count_orders()."""
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM quiz_leads")
+            (count,) = cur.fetchone()
+    return count
+
+
+def _get_recent_quiz_leads(limit=50):
+    """27.08.2026: последние N лидов Квиза для быстрой проверки в /admin —
+    не полноценная админка с действиями (как у заказов Чек-апа), а просто
+    возможность глазами свериться, что данные из формы корректно доходят
+    и сохраняются (особенно телефон после нормализации)."""
+    with _get_db_connection() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(
+                "SELECT lead_id, phone_normalized, data, created_at "
+                "FROM quiz_leads ORDER BY created_at DESC LIMIT %s",
+                (limit,),
+            )
+            rows = cur.fetchall()
+    return rows
+
+
 # Таблица должна существовать до первого запроса — создаём при старте
 # приложения (если DATABASE_URL не задана, не падаем сразу, а только при
 # первой реальной попытке чтения/записи заказов — см. _get_db_connection).
@@ -1039,6 +1108,7 @@ if DATABASE_URL:
     try:
         _init_orders_table()
         _init_settings_table()
+        _init_quiz_leads_table()
     except Exception as _e:
         print(f"DEBUG: не удалось инициализировать таблицы при старте: {_e}", flush=True)
 
@@ -1058,6 +1128,68 @@ def get_product_name(stage_id):
 @app.route("/create-payment-link", methods=["OPTIONS"])
 def create_payment_link_options():
     return ("", 204)
+
+
+@app.route("/quiz-webhook", methods=["OPTIONS"])
+def quiz_webhook_options():
+    return ("", 204)
+
+
+@app.route("/quiz-webhook", methods=["POST"])
+def quiz_webhook():
+    """27.08.2026: приём данных бесплатного Квиза («Возрождение бизнеса») —
+    отдельный, независимый от Чек-апа продукт-триггер (без прямого
+    технического перехода в Чек-ап). Раньше данные Квиза уходили только в
+    UniSender и Tilda CRM, в аналитическую БД не попадали вообще — это и
+    есть то самое упущение, которое сейчас закрывается. Вызывается из
+    Квиза ПАРАЛЛЕЛЬНО с уже работающими sendToUnisender/sendToTildaCRM —
+    те не трогаем, это дополнительный, третий получатель тех же данных.
+
+    Телефон — единственный надёжный сквозной ключ для сопоставления лида
+    Квиза с заказом Чек-апа (email в Квизе необязателен). Нормализуем тем
+    же способом, что и для заказов Чек-апа (normalize_phone), чтобы формат
+    в обеих таблицах совпадал независимо от того, как именно клиент ввёл
+    номер в каждой из форм."""
+    try:
+        payload = request.get_json(force=True)
+        phone_normalized = normalize_phone(payload.get("phone", ""))
+        if not phone_normalized:
+            return jsonify({"ok": False, "error": "phone is required"}), 400
+
+        lead_id = uuid.uuid4().hex[:12]
+        lead_data = {
+            "first_name": payload.get("firstName", ""),
+            "last_name": payload.get("lastName", ""),
+            "email": payload.get("email", ""),
+            # Блок 1 — определение Стадии
+            "stage_id": payload.get("stage", ""),
+            "business_type": payload.get("businessType", ""),
+            "checkup_price": payload.get("checkupPrice", ""),
+            # Блок 2 — Классические вызовы и недостающие КСЭ
+            "challenge_checked": payload.get("challengeChecked", []),
+            "top_elements": payload.get("topElements", []),
+            "red_count": payload.get("redCount", 0),
+            "yellow_count": payload.get("yellowCount", 0),
+            "all_green": payload.get("allGreen", False),
+            # Блок 3 — зрелость/готовность
+            "maturity_score": payload.get("maturityScore", ""),
+            "maturity_label": payload.get("maturityLabel", ""),
+            "branch": payload.get("branch", ""),
+            "barrier": payload.get("barrier", ""),
+            "utm_source": payload.get("utm_source", ""),
+            "utm_medium": payload.get("utm_medium", ""),
+            "utm_campaign": payload.get("utm_campaign", ""),
+            "utm_content": payload.get("utm_content", ""),
+            "utm_term": payload.get("utm_term", ""),
+            "submitted_at": datetime.now().isoformat(),
+        }
+        _save_quiz_lead(lead_id, phone_normalized, lead_data)
+        print(f"DEBUG quiz-webhook: лид {lead_id!r} сохранён. "
+              f"Всего лидов Квиза в БД теперь: {_count_quiz_leads()}", flush=True)
+
+        return jsonify({"ok": True, "lead_id": lead_id})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
 
 
 @app.route("/create-payment-link", methods=["POST"])
@@ -1996,6 +2128,31 @@ def admin_dashboard():
             results_html = f"<table><tr><th>order_id</th><th>№</th><th>Оплата</th><th>Отчёт</th><th>Отправка клиенту</th><th>Действия</th></tr>{rows}</table>"
 
     return ADMIN_DASHBOARD_PAGE.format(email_value=email, message_html=message_html, results_html=results_html)
+
+
+@app.route("/admin/quiz-leads", methods=["GET"])
+@admin_required
+def admin_quiz_leads():
+    """27.08.2026: быстрая проверка данных Квиза после тестового прохождения
+    формы — не полноценная HTML-страница с действиями (как у заказов
+    Чек-апа), а простой JSON-список последних лидов. Если понадобится
+    регулярно сюда заглядывать — можно позже сделать по образцу
+    ADMIN_DASHBOARD_PAGE полноценную таблицу."""
+    leads = _get_recent_quiz_leads(limit=50)
+    return jsonify({
+        "ok": True,
+        "total_count": _count_quiz_leads(),
+        "showing": len(leads),
+        "leads": [
+            {
+                "lead_id": row["lead_id"],
+                "phone_normalized": row["phone_normalized"],
+                "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+                "data": row["data"],
+            }
+            for row in leads
+        ],
+    })
 
 
 @app.route("/admin/send-client/<order_id>", methods=["POST"])
