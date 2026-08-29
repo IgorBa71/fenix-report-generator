@@ -439,7 +439,15 @@ def build_client_response(payload, data, statements):
 
     client_response = {
         "qualification": {
-            "name": q.get("name", ""),
+            # 28.08.2026: раньше было одно поле q["name"] («Имя Фамилия» одной
+            # строкой) — теперь Опросник присылает first_name/last_name
+            # раздельно (см. handoff). "name" оставляем как склеенную строку
+            # для обратной совместимости — этим полем пользуются PDF/PPTX/
+            # письма, переделывать их сейчас не нужно, а раздельные поля
+            # первым делом важны для аналитики (см. checkup_orders_flat).
+            "first_name": q.get("firstName", ""),
+            "last_name": q.get("lastName", ""),
+            "name": f"{q.get('firstName', '')} {q.get('lastName', '')}".strip(),
             "company": q.get("company", ""),
             "email": q.get("email", ""),
             "phone": normalize_phone(q.get("phone", "")),
@@ -623,7 +631,9 @@ def generate_report():
                     order["presentation_base64"] = presentation_base64 or ""
                     order["report_number"] = report_number
                     order["client_email"] = q.get("email", "")
-                    order["client_name"] = q.get("name", "")
+                    order["client_first_name"] = q.get("firstName", "")
+                    order["client_last_name"] = q.get("lastName", "")
+                    order["client_name"] = f"{q.get('firstName', '')} {q.get('lastName', '')}".strip()
 
                     # 28.08.2026: поля для аналитики по базе клиентов Чек-апа
                     # (см. handoff-документы за 27-28.08.2026) — раньше эти
@@ -655,7 +665,7 @@ def generate_report():
                     # клиент реально использует (в отличие от Планёрки или
                     # Продамус, где клиент мог указать другой email).
                     client_email = q.get("email", "")
-                    client_name = q.get("name", "")
+                    client_name = f"{q.get('firstName', '')} {q.get('lastName', '')}".strip()
                     if client_email:
                         try:
                             send_email_smtp(
