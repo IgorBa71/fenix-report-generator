@@ -2299,6 +2299,7 @@ form.inline{{display:inline}}</style></head><body>
 {message_html}
 {results_html}
 <p style="margin-top:20px"><a href="/admin/quiz-leads">→ Лиды Квиза (бесплатная диагностика)</a></p>
+<p style="margin-top:8px"><a href="/admin/analytics">→ Ключевая аналитика (пересечение Квиз↔Чек-ап, Стадии, топ КСЭ)</a></p>
 <form method="post" action="/admin/run-analytics-views" style="margin-top:20px">
 <button type="submit" style="background:#2a6">Пересоздать SQL VIEW для аналитики (DataLens)</button>
 </form>
@@ -2707,6 +2708,89 @@ def _parse_admin_limit(default=100):
     if raw.isdigit():
         return int(raw)
     return default
+
+
+def _query_view(view_name, limit=200):
+    """28.08.2026: универсальный SELECT * FROM <view> LIMIT N — для показа
+    любого из аналитических VIEW прямо в /admin/analytics, без SQL-клиента.
+    view_name НЕ параметризуется через %s (идентификаторы объектов нельзя
+    передавать как значения в psycopg) — поэтому проверяем его по строгому
+    белому списку в самом admin_analytics(), а не здесь."""
+    with _get_db_connection() as conn:
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(f"SELECT * FROM {view_name} LIMIT %s", (limit,))
+            return cur.fetchall()
+
+
+def _rows_to_html_table(rows):
+    if not rows:
+        return "<p class='muted'>Пусто.</p>"
+    columns = list(rows[0].keys())
+    thead = "".join(f"<th>{c}</th>" for c in columns)
+    trs = ""
+    for row in rows:
+        tds = ""
+        for c in columns:
+            val = row[c]
+            if isinstance(val, (dict, list)):
+                val = json.dumps(val, ensure_ascii=False)
+            tds += f"<td>{val if val is not None else '—'}</td>"
+        trs += f"<tr>{tds}</tr>"
+    return f"<table><tr>{thead}</tr>{trs}</table>"
+
+
+ADMIN_ANALYTICS_PAGE = """
+<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8">
+<title>Ключевая аналитика — Феникс</title>
+<style>body{{font-family:sans-serif;max-width:1300px;margin:40px auto;padding:0 16px}}
+table{{width:100%;border-collapse:collapse;margin:12px 0 30px;font-size:13px}}
+td,th{{border:1px solid #ccc;padding:5px 7px;text-align:left;vertical-align:top;white-space:nowrap;
+overflow:hidden;text-overflow:ellipsis;max-width:220px}}
+th{{background:#f4f4f4}}
+.muted{{color:#888;font-size:13px}}
+a.back{{display:inline-block;margin-bottom:10px}}
+h3{{margin-top:36px}}</style>
+</head><body>
+<a class="back" href="/admin">← Назад к панели</a>
+<h2>Ключевая аналитика (превью, без DataLens)</h2>
+
+<h3>Пересечение Квиз ↔ Чек-ап (по телефону)</h3>
+{overlap_summary_html}
+{overlap_html}
+
+<h3>Распределение по Стадиям роста</h3>
+{stage_html}
+
+<h3>Топ недостающих КСЭ</h3>
+{kse_html}
+
+<a class="back" href="/admin">← Назад к панели</a>
+</body></html>
+"""
+
+
+@app.route("/admin/analytics", methods=["GET"])
+@admin_required
+def admin_analytics():
+    """28.08.2026: быстрый просмотр нескольких ключевых аналитических VIEW
+    прямо в браузере, без установки SQL-клиента — по просьбе Игоря после
+    первых тестовых прогонов Опросника и Квиза. Список VIEW жёстко задан
+    (белый список), названия НЕ приходят из запроса пользователя."""
+    try:
+        overlap = _query_view("cross_quiz_checkup_overlap")
+        overlap_summary = _query_view("cross_quiz_checkup_summary")
+        stage = _query_view("checkup_stage_distribution")
+        kse = _query_view("checkup_top_kse")
+    except Exception as e:
+        return f"<p>Ошибка чтения VIEW (возможно, они ещё не созданы — сначала нажмите " \
+               f"«Пересоздать SQL VIEW» на главной панели): {e}</p><a href='/admin'>← Назад</a>"
+
+    return ADMIN_ANALYTICS_PAGE.format(
+        overlap_summary_html=_rows_to_html_table(overlap_summary),
+        overlap_html=_rows_to_html_table(overlap),
+        stage_html=_rows_to_html_table(stage),
+        kse_html=_rows_to_html_table(kse),
+    )
 
 
 ADMIN_RUN_VIEWS_RESULT_PAGE = """
