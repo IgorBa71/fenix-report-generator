@@ -1225,7 +1225,11 @@ def _call_anthropic_api(prompt_text):
         },
         timeout=120,
     )
-    resp.raise_for_status()
+    if not resp.ok:
+        # 28.08.2026: без тела ответа "400 Bad Request" ничего не говорит о
+        # причине (неверная модель, неверный формат запроса и т.п.) —
+        # добавляем текст ответа API в сообщение об ошибке для диагностики.
+        raise RuntimeError(f"Anthropic API вернул {resp.status_code}: {resp.text[:2000]}")
     data = resp.json()
     return "".join(
         block.get("text", "") for block in data.get("content", []) if block.get("type") == "text"
