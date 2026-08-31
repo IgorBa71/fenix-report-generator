@@ -126,6 +126,12 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 # в контейнере на Dockhost (ANTHROPIC_API_KEY), как остальные секреты.
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
+# 28.08.2026: ключ создан как identity-linked (привязан к личному аккаунту,
+# не к workspace напрямую) — такие ключи требуют явно указывать, в каком
+# workspace действует запрос, иначе Anthropic API возвращает 400
+# "anthropic-workspace-id is required". Найти ID: console.anthropic.com →
+# Settings → Workspaces.
+ANTHROPIC_WORKSPACE_ID = os.environ.get("ANTHROPIC_WORKSPACE_ID", "")
 
 # Проактивные уведомления Игорю в мессенджер MAX (бот "Феникс Алерты"),
 # на случай сбоев в отправке Отчётов (Сц1/Сц2) — см. send_max_alert() ниже.
@@ -1211,13 +1217,17 @@ def _call_anthropic_api(prompt_text):
     if not ANTHROPIC_API_KEY:
         raise RuntimeError("ANTHROPIC_API_KEY не задан в переменных окружения")
 
+    headers = {
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    if ANTHROPIC_WORKSPACE_ID:
+        headers["anthropic-workspace-id"] = ANTHROPIC_WORKSPACE_ID
+
     resp = requests.post(
         "https://api.anthropic.com/v1/messages",
-        headers={
-            "x-api-key": ANTHROPIC_API_KEY,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        },
+        headers=headers,
         json={
             "model": ANTHROPIC_MODEL,
             "max_tokens": 4096,
@@ -1229,7 +1239,11 @@ def _call_anthropic_api(prompt_text):
         # 28.08.2026: без тела ответа "400 Bad Request" ничего не говорит о
         # причине (неверная модель, неверный формат запроса и т.п.) —
         # добавляем текст ответа API в сообщение об ошибке для диагностики.
-        raise RuntimeError(f"Anthropic API вернул {resp.status_code}: {resp.text[:2000]}")
+        hint = ""
+        if "anthropic-workspace-id" in resp.text and not ANTHROPIC_WORKSPACE_ID:
+            hint = (" Подсказка: добавьте переменную окружения ANTHROPIC_WORKSPACE_ID "
+                    "(найти в console.anthropic.com → Settings → Workspaces).")
+        raise RuntimeError(f"Anthropic API вернул {resp.status_code}: {resp.text[:2000]}{hint}")
     data = resp.json()
     return "".join(
         block.get("text", "") for block in data.get("content", []) if block.get("type") == "text"
@@ -1399,6 +1413,11 @@ def quiz_webhook():
             "maturity_label": payload.get("maturityLabel", ""),
             "branch": payload.get("branch", ""),
             "barrier": payload.get("barrier", ""),
+            # 29.08.2026: сырые ответы клиента по каждому из 7 вопросов
+            # Блока 3 (вопрос+ответ текстом) — раньше в БД уходили только
+            # агрегаты (score/label/branch/barrier), сами ответы нигде не
+            # сохранялись.
+            "maturity_raw_answers": payload.get("maturityRawAnswers", []),
             "utm_source": payload.get("utm_source", ""),
             "utm_medium": payload.get("utm_medium", ""),
             "utm_campaign": payload.get("utm_campaign", ""),
@@ -2995,6 +3014,15 @@ def admin_quiz_leads():
                 e.get("name", "") for e in top_elements if isinstance(e, dict)
             ) or "—"
             utm_source = d.get("utm_source") or "—"
+            raw_answers = d.get("maturity_raw_answers") or []
+            if raw_answers:
+                answers_list = "".join(
+                    f"<li><b>{a.get('question','')}</b><br>{a.get('answer') or '—'}</li>"
+                    for a in raw_answers if isinstance(a, dict)
+                )
+                block3_html = f"<details><summary>Показать ({len(raw_answers)})</summary><ul style='margin:4px 0 0;padding-left:16px'>{answers_list}</ul></details>"
+            else:
+                block3_html = "—"
             rows += f"""
             <tr>
                 <td>{created}</td>
@@ -3004,6 +3032,7 @@ def admin_quiz_leads():
                 <td>{d.get('stage_id', '—')}</td>
                 <td>{d.get('business_type', '—')}</td>
                 <td>{d.get('maturity_label', '—')} ({d.get('maturity_score', '—')})</td>
+                <td>{block3_html}</td>
                 <td>🔴{d.get('red_count', 0)} 🟡{d.get('yellow_count', 0)}</td>
                 <td>{elements_str}</td>
                 <td>{utm_source}</td>
@@ -3011,7 +3040,7 @@ def admin_quiz_leads():
         rows_html = (
             "<table><tr>"
             "<th>Дата</th><th>Имя</th><th>Телефон</th><th>Email</th>"
-            "<th>Стадия</th><th>Тип</th><th>Зрелость</th><th>Вызовы</th>"
+            "<th>Стадия</th><th>Тип</th><th>Зрелость</th><th>Блок 3 (ответы)</th><th>Вызовы</th>"
             "<th>Топ КСЭ</th><th>UTM-источник</th>"
             f"</tr>{rows}</table>"
         )
