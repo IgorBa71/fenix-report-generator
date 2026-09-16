@@ -1564,15 +1564,25 @@ def build_quiz_explanation_story(lead_data: dict, data: dict) -> list:
     Квиза — но не подменяет собой полный Чек-ап.
 
     lead_data — запись из quiz_leads.data (first_name, stage_id,
-    challenge_checked, top_elements — уже готовые, см. /quiz-webhook).
+    challenge_names, top_elements — уже готовые, см. /quiz-webhook).
     data — общие справочные JSON (stage_level_report_texts,
     challenge_symptoms_by_stage, kse_descriptions), как и в build_story()."""
     story = []
     first_name = lead_data.get("first_name", "")
     stage_id_raw = lead_data.get("stage_id", "")
     stage_id = int(stage_id_raw) if str(stage_id_raw).isdigit() else None
-    challenge_names = lead_data.get("challenge_checked") or []
-    top_elements = (lead_data.get("top_elements") or [])[:3]
+    # 16.09.2026: было "challenge_checked" (массив чисел 0-4 по индексам —
+    # НЕ названия вызовов) — из-за этого падало с TypeError. Правильное поле
+    # с готовыми названиями — "challenge_names" (см. /quiz-webhook и
+    # calcElements() в quiz.html, где оно теперь считается).
+    challenge_names = lead_data.get("challenge_names") or []
+    # top_elements — массив ОБЪЕКТОВ {name, color}, не строк — нужно
+    # извлечь имя из каждого (обнаружено 16.09.2026, тоже роняло сервер).
+    top_elements_raw = (lead_data.get("top_elements") or [])[:3]
+    top_elements = [
+        el.get("name", "") if isinstance(el, dict) else str(el)
+        for el in top_elements_raw
+    ]
 
     # ---------- Обложка ----------
     # Вся вёрстка обложки рисуется абсолютными координатами в draw_cover()

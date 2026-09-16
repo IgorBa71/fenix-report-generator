@@ -1408,6 +1408,9 @@ def quiz_webhook():
             "chosen_route": payload.get("chosenRoute", ""),
             # Блок 2 — Классические вызовы и недостающие КСЭ
             "challenge_checked": payload.get("challengeChecked", []),
+            # 16.09.2026: готовые названия подтверждённых вызовов (не сырые
+            # счётчики) — нужны generate_quiz_explanation_pdf() для письма П1.
+            "challenge_names": payload.get("confirmedChallenges", []),
             "top_elements": payload.get("topElements", []),
             "red_count": payload.get("redCount", 0),
             "yellow_count": payload.get("yellowCount", 0),
