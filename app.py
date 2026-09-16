@@ -38,7 +38,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.platypus import SimpleDocTemplate
@@ -1436,6 +1436,44 @@ def quiz_webhook():
         return jsonify({"ok": True, "lead_id": lead_id})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 400
+
+
+@app.route("/quiz-explanation-pdf/<phone>", methods=["GET"])
+def quiz_explanation_pdf(phone):
+    """13.09.2026: письмо П1 ветки КОНСУЛЬТАНТ — персональный PDF с разбором
+    результатов Квиза глубже, чем на экране самого инструмента (см. Раздел 4
+    стратегии). Генерируется НА ЛЕТУ при каждом клике по ссылке
+    {{explanation_pdf_url}} = https://api.fenix-lab.ru/quiz-explanation-pdf/{{phone}}
+    из письма в UniSender — ничего не сохраняется на диск и не хранится.
+
+    Поиск лида по телефону (не lead_id): сам /quiz-webhook вызывается
+    «выстрелил и забыл», без возврата lead_id фронтенду — а телефон уже и
+    так уходит в UniSender как обычное поле, готовое поле для merge-тега.
+    Если один и тот же телефон проходил Квиз несколько раз — берём самый
+    свежий лид (ORDER BY created_at DESC)."""
+    phone_normalized = normalize_phone(phone)
+    if not phone_normalized:
+        return jsonify({"ok": False, "error": "invalid phone"}), 400
+
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT data FROM quiz_leads WHERE phone_normalized = %s "
+                "ORDER BY created_at DESC LIMIT 1",
+                (phone_normalized,),
+            )
+            row = cur.fetchone()
+    if not row:
+        return jsonify({"ok": False, "error": "lead not found for this phone"}), 404
+
+    lead_data = row[0]  # JSONB уже приходит как dict через psycopg
+    pdf_bytes = prb.generate_quiz_explanation_pdf(lead_data)
+    return send_file(
+        io.BytesIO(pdf_bytes),
+        mimetype="application/pdf",
+        as_attachment=False,
+        download_name="Разбор результатов экспресс-диагностики.pdf",
+    )
 
 
 @app.route("/create-payment-link", methods=["POST"])
