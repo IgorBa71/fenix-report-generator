@@ -2498,7 +2498,6 @@ SELECT
     data->>'email'                                           AS email,
     NULLIF(data->>'stage_id', '')::int                       AS stage_id,
     data->>'business_type'                                    AS business_type,
-    data->>'chosen_route'                                      AS chosen_route,
     NULLIF(data->>'red_count', '')::int                       AS red_count,
     NULLIF(data->>'yellow_count', '')::int                    AS yellow_count,
     data->>'maturity_label'                                    AS maturity_label,
@@ -2506,7 +2505,8 @@ SELECT
     data->>'utm_source'                                         AS utm_source,
     data->>'utm_medium'                                          AS utm_medium,
     data->>'utm_campaign'                                        AS utm_campaign,
-    (data->'top_elements')                                       AS top_elements
+    (data->'top_elements')                                       AS top_elements,
+    data->>'chosen_route'                                      AS chosen_route
 FROM quiz_leads;
 
 
