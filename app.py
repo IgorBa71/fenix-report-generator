@@ -1402,6 +1402,10 @@ def quiz_webhook():
             "stage_id": payload.get("stage", ""),
             "business_type": payload.get("businessType", ""),
             "checkup_price": payload.get("checkupPrice", ""),
+            # 13.09.2026: явный выбор маршрута клиентом на экране «Что
+            # дальше?» (consultant/self/undecided) — макро-маршрут,
+            # приоритетнее вычисленной зрелости (Блок 3) при их расхождении.
+            "chosen_route": payload.get("chosenRoute", ""),
             # Блок 2 — Классические вызовы и недостающие КСЭ
             "challenge_checked": payload.get("challengeChecked", []),
             "top_elements": payload.get("topElements", []),
@@ -2456,6 +2460,7 @@ SELECT
     data->>'email'                                           AS email,
     NULLIF(data->>'stage_id', '')::int                       AS stage_id,
     data->>'business_type'                                    AS business_type,
+    data->>'chosen_route'                                      AS chosen_route,
     NULLIF(data->>'red_count', '')::int                       AS red_count,
     NULLIF(data->>'yellow_count', '')::int                    AS yellow_count,
     data->>'maturity_label'                                    AS maturity_label,
