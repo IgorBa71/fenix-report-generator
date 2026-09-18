@@ -38,7 +38,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
 
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, Response
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.platypus import SimpleDocTemplate
@@ -1477,6 +1477,125 @@ def quiz_explanation_pdf(phone):
         as_attachment=False,
         download_name="Разбор результатов экспресс-диагностики.pdf",
     )
+
+
+# ===========================================================================
+# ЛИЧНЫЙ НАБОР КНИГ (маршрут САМ, П4б) — 17.09.2026
+# ---------------------------------------------------------------------------
+# После оплаты бандла «Курс + персональный набор книг» в School-Master клиент
+# получает письмо-квитанцию (штатный механизм School-Master, вкладка
+# «События» продукта), куда мы вставляем ссылку с переменной [CLIENT_PHONE]:
+#   https://api.fenix-lab.ru/personal-books/[CLIENT_PHONE]
+# Курс выдаётся отдельно, штатно через Группу School-Master — эта страница
+# отвечает только за книги (3 по топ-элементам клиента + 1 по его Стадии),
+# т.к. персональный набор книг у каждого клиента свой и через Группы
+# School-Master выдать его невозможно. Ссылки статичные (Яндекс.Диск),
+# сама страница собирается на лету — ничего не хранится на сервере.
+# ===========================================================================
+
+KSE_BOOK_URLS = {
+    "Базовые бизнес-процессы": "https://disk.360.yandex.ru/i/7RIhrZHRV2SwSA",
+    "Бизнес-модель": "https://disk.360.yandex.ru/i/cgnOtKFI0a9Hsg",
+    "Ключевые показатели эффективности": "https://disk.360.yandex.ru/i/vmAEoWZCHq6g5g",
+    "Комплексное планирование": "https://disk.360.yandex.ru/i/YlDnytBUxeTqqQ",
+    "Коучинговое управление персоналом": "https://disk.360.yandex.ru/i/HwuxcYAYqMiVmQ",
+    "Критерии роста бизнеса": "https://disk.360.yandex.ru/i/5D3djDnvHvU0CA",
+    "Организационная структура": "https://disk.360.yandex.ru/i/amOVFG-wvA6GAg",
+    "Сильная Управленческая команда": "https://disk.360.yandex.ru/i/XHL6fWt5seVuzw",
+    "Структура рабочих совещаний": "https://disk.360.yandex.ru/i/hw9obxloPddUuQ",
+    "Структура Развития бизнеса": "https://disk.360.yandex.ru/i/mouEkOmOhND73A",
+    "Ценности бренда и Базовые ценности": "https://disk.360.yandex.ru/i/Ra6qJyLbMb_KQw",
+}
+
+STAGE_BOOK_URLS = {
+    1: "https://disk.360.yandex.ru/i/f-875ARyHTdX0w",
+    2: "https://disk.360.yandex.ru/i/aSRtDtyfzwNDYA",
+    3: "https://disk.360.yandex.ru/i/OqZijPdnjgae-Q",
+    4: "https://disk.360.yandex.ru/i/v9qV0xTbhrzNNg",
+    5: "https://disk.360.yandex.ru/i/nKOMllu3vpR31Q",
+    6: "https://disk.360.yandex.ru/i/ZBJE_pwGV0kB1w",
+    7: "https://disk.360.yandex.ru/i/sHwMJnzxMv3JTQ",
+}
+
+PERSONAL_BOOKS_PAGE_TEMPLATE = """<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ваши книги — Лаборатория бизнес лидерства «Феникс»</title>
+<style>
+  body {{ margin:0; padding:0; background:#0B1C2E; font-family:'Inter',Arial,sans-serif; color:#ffffff; }}
+  .wrap {{ max-width:640px; margin:0 auto; padding:48px 24px; }}
+  h1 {{ font-size:22px; margin-bottom:8px; }}
+  p.sub {{ color:#B9C2CC; font-size:15px; margin-top:0; margin-bottom:32px; }}
+  .book {{ display:block; background:#132840; border:1px solid #24405e; border-radius:10px;
+           padding:18px 20px; margin-bottom:14px; text-decoration:none; color:#ffffff; }}
+  .book:hover {{ border-color:#D5530B; }}
+  .book .label {{ font-size:12px; text-transform:uppercase; color:#D5530B; letter-spacing:.04em; margin-bottom:4px; }}
+  .book .name {{ font-size:17px; font-weight:600; }}
+  footer {{ margin-top:40px; font-size:13px; color:#7C8896; }}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Здравствуйте, {first_name}!</h1>
+  <p class="sub">Ваш персональный набор книг — по вашим приоритетным элементам и вашей Стадии роста. Курс уже открыт в личном кабинете {courses_link}.</p>
+  {book_links}
+  <footer>Лаборатория бизнес лидерства «Феникс» · www.fenix-lab.ru</footer>
+</div>
+</body>
+</html>"""
+
+
+@app.route("/personal-books/<phone>", methods=["GET"])
+def personal_books(phone):
+    phone_normalized = normalize_phone(phone)
+    if not phone_normalized:
+        return jsonify({"ok": False, "error": "invalid phone"}), 400
+
+    with _get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT data FROM quiz_leads WHERE phone_normalized = %s "
+                "ORDER BY created_at DESC LIMIT 1",
+                (phone_normalized,),
+            )
+            row = cur.fetchone()
+    if not row:
+        return jsonify({"ok": False, "error": "lead not found for this phone"}), 404
+
+    lead_data = row[0]
+    first_name = lead_data.get("first_name", "")
+    stage_id_raw = lead_data.get("stage_id", "")
+    stage_id = int(stage_id_raw) if str(stage_id_raw).isdigit() else None
+    top_elements_raw = (lead_data.get("top_elements") or [])[:3]
+    top_elements = [
+        el.get("name", "") if isinstance(el, dict) else str(el)
+        for el in top_elements_raw
+    ]
+
+    links_html = ""
+    for el_name in top_elements:
+        url = KSE_BOOK_URLS.get(el_name)
+        if url:
+            links_html += (
+                f'<a class="book" href="{url}" target="_blank">'
+                f'<div class="label">Системный элемент</div>'
+                f'<div class="name">{el_name}</div></a>\n'
+            )
+    if stage_id and stage_id in STAGE_BOOK_URLS:
+        links_html += (
+            f'<a class="book" href="{STAGE_BOOK_URLS[stage_id]}" target="_blank">'
+            f'<div class="label">Ваша Стадия роста</div>'
+            f'<div class="name">Стадия {stage_id}</div></a>\n'
+        )
+
+    html = PERSONAL_BOOKS_PAGE_TEMPLATE.format(
+        first_name=first_name,
+        courses_link='<a href="https://fenix-lms.ru" style="color:#D5530B">на fenix-lms.ru</a>',
+        book_links=links_html or "<p>Не удалось определить ваш набор книг — напишите нам, поможем вручную.</p>",
+    )
+    return Response(html, mimetype="text/html")
 
 
 @app.route("/create-payment-link", methods=["POST"])
