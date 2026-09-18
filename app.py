@@ -1467,7 +1467,7 @@ def quiz_explanation_pdf(phone):
             )
             row = cur.fetchone()
     if not row:
-        return jsonify({"ok": False, "error": "lead not found for this phone"}), 404
+        return Response(NOT_FOUND_PAGE_TEMPLATE, mimetype="text/html", status=404)
 
     lead_data = row[0]  # JSONB уже приходит как dict через psycopg
     pdf_bytes = prb.generate_quiz_explanation_pdf(lead_data)
@@ -1546,6 +1546,35 @@ PERSONAL_BOOKS_PAGE_TEMPLATE = """<!DOCTYPE html>
 </body>
 </html>"""
 
+# 17.09.2026: единая брендированная страница «не нашли по этому номеру» —
+# переиспользуется и в /quiz-explanation-pdf, и в /personal-books, вместо
+# голого JSON {"ok": false, ...}, который раньше видел клиент при рассинхроне
+# телефона между Квизом и оплатой (см. обсуждение в чате).
+NOT_FOUND_PAGE_TEMPLATE = """<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Не нашли ваш заказ — Лаборатория бизнес лидерства «Феникс»</title>
+<style>
+  body { margin:0; padding:0; background:#0B1C2E; font-family:'Inter',Arial,sans-serif; color:#ffffff; }
+  .wrap { max-width:560px; margin:0 auto; padding:64px 24px; text-align:center; }
+  h1 { font-size:22px; margin-bottom:12px; }
+  p { color:#B9C2CC; font-size:15px; line-height:1.6; }
+  a.mail { color:#D5530B; font-weight:600; text-decoration:none; }
+  footer { margin-top:40px; font-size:13px; color:#7C8896; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Не нашли ваш заказ</h1>
+  <p>Похоже, номер телефона в ссылке не совпадает с тем, что вы указывали при прохождении Экспресс-диагностики. Такое бывает, если при оформлении заказа был указан другой телефон или email.</p>
+  <p>Напишите нам — поможем вручную:<br><a class="mail" href="mailto:info@fenix-lms.ru">info@fenix-lms.ru</a></p>
+  <footer>Лаборатория бизнес лидерства «Феникс» · www.fenix-lab.ru</footer>
+</div>
+</body>
+</html>"""
+
 
 @app.route("/personal-books/<phone>", methods=["GET"])
 def personal_books(phone):
@@ -1562,7 +1591,7 @@ def personal_books(phone):
             )
             row = cur.fetchone()
     if not row:
-        return jsonify({"ok": False, "error": "lead not found for this phone"}), 404
+        return Response(NOT_FOUND_PAGE_TEMPLATE, mimetype="text/html", status=404)
 
     lead_data = row[0]
     first_name = lead_data.get("first_name", "")
