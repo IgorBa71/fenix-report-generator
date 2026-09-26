@@ -153,6 +153,27 @@ PRODAMUS_FORM_URL = "https://fenix-lab.payform.ru/"
 # приложения на хостинге (Timeweb) — иначе платежи и вебхук перестанут
 # работать (подпись будет пустой строкой).
 PRODAMUS_SECRET_KEY = os.environ.get("PRODAMUS_SECRET_KEY", "")
+
+# ---------------------------------------------------------------------------
+# 26.09.2026: отметки в UniSender для писем-напоминаний Трека В (раздел 9.5).
+# Контакты в списки UniSender кладёт сама Tilda (формы-получатели):
+#   - форма Шага 1 Опросника (BF204N) → список «Чек-ап: начали оформление»;
+#   - форма project-start-meeting     → список «Форма Согласование проекта».
+# Сервер лишь ставит отметку, чтобы сценарий UniSender НЕ слал напоминание
+# тем, кто уже сделал следующий шаг:
+#   - checkup_paid = "yes"   — пришла успешная оплата Комплексной диагностики;
+#   - meeting_booked = "yes" — Планёрка сообщила о записи на встречу.
+# Оба поля нужно ЗАРАНЕЕ создать вручную в UniSender (Контакты →
+# Дополнительные поля), API кастомные поля сам не создаёт (урок 8.8d).
+# Если какая-то переменная не задана — отметка тихо пропускается, остальная
+# работа (оплата, вебхуки) не ломается.
+UNISENDER_API_KEY = os.environ.get("UNISENDER_API_KEY", "")
+UNISENDER_CHECKUP_LIST_ID = os.environ.get("UNISENDER_CHECKUP_LIST_ID", "")
+UNISENDER_MEETING_LIST_ID = os.environ.get("UNISENDER_MEETING_LIST_ID", "")
+UNISENDER_SUBSCRIBE_URL = "https://api.unisender.com/ru/api/subscribe"
+# Планёрка не подписывает свои вебхуки — защищаемся секретным токеном в
+# адресе вебхука: https://api.fenix-lab.ru/planerka-webhook?token=<значение>.
+PLANERKA_WEBHOOK_TOKEN = os.environ.get("PLANERKA_WEBHOOK_TOKEN", "")
 # ORDERS_FILE (путь к файлу заказов) больше не используется — 19.08.2026
 # заказы Prodamus перенесены в PostgreSQL, см. _load_orders/_save_orders
 # ниже по файлу.
@@ -1697,6 +1718,14 @@ def create_payment_link():
             "utm_content": payload.get("utm_content", ""),
             "utm_term": payload.get("utm_term", ""),
             "yandex_client_id": payload.get("yandex_client_id", ""),
+            # 26.09.2026: контакты клиента сохраняем вместе с заказом — по
+            # customer_email вебхук оплаты ставит отметку checkup_paid в
+            # UniSender (см. mark_unisender_contact). Раньше эти данные
+            # уходили только в ссылку Prodamus, а в заказ не попадали.
+            "customer_email": (payload.get("email", "") or "").strip(),
+            "customer_phone": normalize_phone(payload.get("phone", "")),
+            "first_name": payload.get("first_name", ""),
+            "last_name": payload.get("last_name", ""),
         }
         _save_order(order_id, new_order)
         print(f"DEBUG create-payment-link: заказ {order_id!r} сохранён. "
@@ -1866,10 +1895,75 @@ def prodamus_webhook():
                     "utm_term": order.get("utm_term", ""),
                 },
             )
+            # 26.09.2026: отметка «оплатил» для сценария напоминаний В1.
+            # Email берём из заказа; если его там нет (заказ создан до этой
+            # правки) — из самого уведомления Prodamus.
+            paid_email = order.get("customer_email") or incoming.get("customer_email", "")
+            mark_unisender_contact(paid_email, UNISENDER_CHECKUP_LIST_ID,
+                                   {"checkup_paid": "yes"}, context=f"оплата {order_id}")
     else:
         print(f"DEBUG webhook: ЗАКАЗ {order_id!r} НЕ НАЙДЕН — обновление пропущено!", flush=True)
 
     return "success", 200
+
+
+def mark_unisender_contact(email, list_id, fields, context=""):
+    """26.09.2026: ставит отметку (доп. поля) контакту в списке UniSender.
+    Метод subscribe с double_optin=3 — тихое добавление/обновление без
+    письма-подтверждения (с "0" UniSender запускал double opt-in — урок
+    8.8d); overwrite=2 — перезаписать только переданные поля, остальные
+    данные контакта не трогать. Никогда не бросает исключений наружу:
+    сбой UniSender не должен ломать обработку оплаты или записи."""
+    email = (email or "").strip()
+    if not (UNISENDER_API_KEY and list_id and email):
+        print(f"DEBUG unisender mark [{context}]: пропуск — нет ключа, "
+              f"списка или email (email={email!r})", flush=True)
+        return False
+    params = {
+        "format": "json",
+        "api_key": UNISENDER_API_KEY,
+        "list_ids": list_id,
+        "fields[email]": email,
+        "double_optin": "3",
+        "overwrite": "2",
+    }
+    for key, value in fields.items():
+        params[f"fields[{key}]"] = value
+    try:
+        resp = requests.post(UNISENDER_SUBSCRIBE_URL, data=params, timeout=10)
+        body = resp.json()
+        if "error" in body:
+            print(f"DEBUG unisender mark [{context}]: ошибка UniSender для "
+                  f"{email!r}: {body.get('error')}", flush=True)
+            return False
+        print(f"DEBUG unisender mark [{context}]: {email!r} помечен {fields}", flush=True)
+        return True
+    except Exception as e:
+        print(f"DEBUG unisender mark [{context}]: сбой запроса для {email!r}: {e}", flush=True)
+        return False
+
+
+@app.route("/planerka-webhook", methods=["POST"])
+def planerka_webhook():
+    """26.09.2026: вебхук Планёрки (Интеграции → «Добавить вебхук», событие
+    «Создание новой записи»). Планёрка присылает JSON вида
+    {"event": "BOOKING_CREATED", "attendees": [{"email": ...}], ...}.
+    Для каждой новой записи помечаем гостя в списке «Форма Согласование
+    проекта» полем meeting_booked=yes — чтобы сценарий UniSender не слал
+    ему напоминание «вы не выбрали время» (Трек В, Ветка 2).
+    Всегда отвечаем 200, кроме неверного токена: Планёрке не нужно
+    повторять доставку из-за наших внутренних сбоев."""
+    if not PLANERKA_WEBHOOK_TOKEN or request.args.get("token", "") != PLANERKA_WEBHOOK_TOKEN:
+        return "forbidden", 403
+    payload = request.get_json(force=True, silent=True) or {}
+    event = payload.get("event", "")
+    print(f"DEBUG planerka webhook: event={event!r}, title={payload.get('title')!r}", flush=True)
+    if event != "BOOKING_CREATED":
+        return "ignored", 200
+    for attendee in payload.get("attendees") or []:
+        mark_unisender_contact(attendee.get("email", ""), UNISENDER_MEETING_LIST_ID,
+                               {"meeting_booked": "yes"}, context="запись в Планёрке")
+    return "ok", 200
 
 
 @app.route("/verify-payform-redirect", methods=["OPTIONS"])
